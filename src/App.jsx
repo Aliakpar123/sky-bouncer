@@ -1,0 +1,57 @@
+import { Route, Routes } from 'react-router-dom';
+import { TonConnectUIProvider } from '@tonconnect/ui-react';
+import { UserProvider, useUser } from './context/UserContext';
+import TabBar from './components/layout/TabBar';
+import Home from './pages/Home';
+import MapPage from './pages/MapPage';
+import Offers from './pages/Offers';
+import Referral from './pages/Referral';
+import Wallet from './pages/Wallet';
+import Merchant from './pages/Merchant';
+
+const TON_MANIFEST_URL =
+  import.meta.env.VITE_TONCONNECT_MANIFEST_URL ?? '/tonconnect-manifest.json';
+
+function AppShell() {
+  const { loading, error } = useUser();
+
+  if (loading) {
+    return (
+      <div className="h-screen flex items-center justify-center text-white/50">
+        Loading Pulse Radar…
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="h-screen flex items-center justify-center px-8 text-center text-white/60">
+        {error}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/map" element={<MapPage />} />
+        <Route path="/offers" element={<Offers />} />
+        <Route path="/referral" element={<Referral />} />
+        <Route path="/wallet" element={<Wallet />} />
+        <Route path="/merchant/:venueId" element={<Merchant />} />
+      </Routes>
+      <TabBar />
+    </>
+  );
+}
+
+export default function App() {
+  return (
+    <TonConnectUIProvider manifestUrl={TON_MANIFEST_URL}>
+      <UserProvider>
+        <AppShell />
+      </UserProvider>
+    </TonConnectUIProvider>
+  );
+}
