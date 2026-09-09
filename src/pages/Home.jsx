@@ -9,7 +9,7 @@ import { supabase } from '../lib/supabase';
 const SYNC_INTERVAL_MS = 30000;
 
 export default function Home() {
-  const { profile, refreshProfile } = useUser();
+  const { profile, setProfile } = useUser();
   const { steps, pointsEarned, supported, permission, requestPermission } = useSteps();
   const lastSyncedSteps = useRef(0);
 
@@ -22,21 +22,19 @@ export default function Home() {
     const interval = setInterval(async () => {
       const delta = steps - lastSyncedSteps.current;
       if (delta <= 0) return;
-      const deltaPoints = Math.floor((delta / 1000) * 100);
       lastSyncedSteps.current = steps;
       try {
-        await supabase.rpc('sync_step_activity', {
-          p_user_id: profile.id,
-          p_steps: delta,
-          p_points: deltaPoints,
-        });
-        await refreshProfile(profile.id);
+        // Points are derived server-side from the step delta — sending them
+        // from here would let anyone with the public anon key mint balance.
+        const { data, error } = await supabase.rpc('sync_step_activity', { p_steps: delta });
+        if (error) throw error;
+        if (data) setProfile(data);
       } catch (err) {
         console.error('Failed to sync steps', err);
       }
     }, SYNC_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [steps, profile, refreshProfile]);
+  }, [steps, profile, setProfile]);
 
   return (
     <div className="pb-24">

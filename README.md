@@ -34,6 +34,16 @@ bot/
 1. Create a project at [supabase.com](https://supabase.com).
 2. Open the SQL editor and run `supabase/schema.sql`.
 3. Copy your project URL and anon key.
+4. Deploy the auth function and give it the secrets it needs:
+
+```bash
+supabase functions deploy telegram-auth --no-verify-jwt
+supabase secrets set BOT_TOKEN=<your bot token> SUPABASE_JWT_SECRET=<Settings → API → JWT secret>
+```
+
+`--no-verify-jwt` is required: this is the endpoint that *issues* the JWT, so
+it must accept unauthenticated calls. It is not an open door — it returns a
+token only for an `initData` string carrying a valid Telegram HMAC signature.
 
 ### 2. Frontend
 
@@ -87,12 +97,37 @@ attribution.
 - **Bot**: Render or Fly.io as a persistent worker. Set `WEBHOOK_URL` to run
   in webhook mode instead of long polling.
 
-## Security notes
+## Security model
 
-- All balance/referral/check-in mutations go through `SECURITY DEFINER` RPC
-  functions — the anon key never has direct `UPDATE`/`INSERT` grants on
-  `users`, `checkins`, or `redemptions`.
-- The read policies in `schema.sql` are intentionally permissive for local
-  development. Before production launch, bridge Telegram's `initData` HMAC
-  verification into a Supabase custom JWT (edge function) and scope the
-  `select` policies to `auth.uid()`.
+The anon key ships inside the Mini App bundle and is public. Nothing in the
+data layer trusts it beyond reading the partner catalogue.
+
+- **Identity** comes from the `telegram_id` claim of a JWT minted by the
+  `telegram-auth` edge function, which validates Telegram's `initData` HMAC
+  signature (and rejects payloads older than 24h to bound replay). No RPC
+  accepts a caller-supplied user id.
+- **Points are derived server-side.** `sync_step_activity` takes a step delta
+  and computes the reward itself. It is bounded twice: a cadence ceiling of
+  4 steps/second since the last sync, and a 30,000-step daily cap. Steps come
+  from a device the user controls, so these ceilings bound forgery — they do
+  not eliminate it. Anything of real value (a token claim, a payout) needs a
+  stronger signal than accelerometer data.
+- **Check-in needs two independent factors**: a short-lived QR token that only
+  the venue owner can mint (`generate_checkin_token` is owner-restricted —
+  otherwise any user could mint a valid code for any venue), plus GPS within
+  150m. One check-in per venue per day.
+- **The QR code is rendered on-device.** The token is a bearer credential, so
+  it must never be handed to a third-party QR image service.
+- **RLS is scoped to the verified identity**: users, activities, check-ins and
+  redemptions are readable only by their owner (or the venue owner, for
+  venue-side rows). `checkin_tokens` has no select policy at all.
+
+Known gaps, in rough priority order:
+
+1. Nothing has been tested against a live Supabase project — the schema and
+   edge function are written but unrun. Verify the initData signature path
+   against a real bot token before trusting it.
+2. There is no venue-owner onboarding flow; `venues.owner_user_id` has to be
+   set by hand for now.
+3. `TonConnectUIProvider` wraps the whole app, so the wallet list (~25 CDN
+   hosts) is fetched on every screen, not just `/wallet`.

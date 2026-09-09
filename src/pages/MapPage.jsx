@@ -23,7 +23,6 @@ export default function MapPage() {
 
   async function handleConfirmCheckIn({ offer, qrPayload, userPosition }) {
     const { error } = await supabase.rpc('confirm_checkin', {
-      p_user_id: profile.id,
       p_offer_id: offer.id,
       p_qr_payload: qrPayload,
       p_lat: userPosition.lat,

@@ -36,10 +36,10 @@ export function UserProvider({ children }) {
       const referrerId = getReferrerIdFromStartParam();
 
       try {
-        // Upsert via RPC so first-touch referral attribution is set atomically
-        // and never overwritten on subsequent launches.
+        // The user id is never sent from here — it comes from the verified
+        // `telegram_id` claim of the JWT the RPC runs under. Referral
+        // attribution is first-touch and never overwritten on later launches.
         const { data, error: rpcError } = await supabase.rpc('upsert_user_session', {
-          p_id: tgUser.id,
           p_first_name: tgUser.first_name ?? null,
           p_username: tgUser.username ?? null,
           p_referrer_id: referrerId,
@@ -61,7 +61,7 @@ export function UserProvider({ children }) {
   }, []);
 
   const value = useMemo(
-    () => ({ profile, loading, error, refreshProfile }),
+    () => ({ profile, setProfile, loading, error, refreshProfile }),
     [profile, loading, error, refreshProfile]
   );
 

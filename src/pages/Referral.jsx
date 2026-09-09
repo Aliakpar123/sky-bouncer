@@ -11,7 +11,7 @@ export default function Referral() {
   useEffect(() => {
     if (!profile) return;
     async function loadCounts() {
-      const { data, error } = await supabase.rpc('referral_counts', { p_user_id: profile.id });
+      const { data, error } = await supabase.rpc('referral_counts');
       if (error) console.error('Failed to load referral counts', error);
       else setCounts({ tier1: data.tier1 ?? 0, tier2: data.tier2 ?? 0 });
     }

@@ -27,10 +27,7 @@ export default function Offers() {
     setRedeemingId(offer.id);
     setMessage(null);
     try {
-      const { error } = await supabase.rpc('redeem_offer', {
-        p_user_id: profile.id,
-        p_offer_id: offer.id,
-      });
+      const { error } = await supabase.rpc('redeem_offer', { p_offer_id: offer.id });
       if (error) throw error;
       await refreshProfile(profile.id);
       haptic('success');
