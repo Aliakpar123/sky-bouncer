@@ -25,8 +25,12 @@ create table if not exists public.users (
   streak int not null default 0,
   last_active_date date,
   last_step_sync_at timestamptz,
+  onboarded_at timestamptz,
   created_at timestamptz not null default timezone('utc', now())
 );
+
+-- Kept separate from the create so existing projects pick it up on re-apply.
+alter table public.users add column if not exists onboarded_at timestamptz;
 
 create table if not exists public.venues (
   id uuid primary key default gen_random_uuid(),
@@ -337,6 +341,38 @@ end;
 $$;
 
 -- ============================================================================
+-- RPC: complete_onboarding
+-- Marks the intro flow as seen. Stored server-side rather than in
+-- localStorage so it survives a new device or a cleared WebView.
+-- ============================================================================
+create or replace function public.complete_onboarding()
+returns public.users
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_id bigint := public.current_telegram_id();
+  v_user public.users;
+begin
+  if v_id is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  update public.users
+    set onboarded_at = coalesce(onboarded_at, timezone('utc', now()))
+    where id = v_id
+    returning * into v_user;
+
+  if not found then
+    raise exception 'User not found';
+  end if;
+
+  return v_user;
+end;
+$$;
+
+-- ============================================================================
 -- RPC: referral_counts
 -- ============================================================================
 create or replace function public.referral_counts()
@@ -590,6 +626,7 @@ $$;
 revoke all on function
   public.upsert_user_session(text, text, bigint),
   public.sync_step_activity(int),
+  public.complete_onboarding(),
   public.referral_counts(),
   public.generate_checkin_token(uuid, int),
   public.confirm_checkin(uuid, text, double precision, double precision),
@@ -600,6 +637,7 @@ from public, anon;
 grant execute on function
   public.upsert_user_session(text, text, bigint),
   public.sync_step_activity(int),
+  public.complete_onboarding(),
   public.referral_counts(),
   public.generate_checkin_token(uuid, int),
   public.confirm_checkin(uuid, text, double precision, double precision),

@@ -121,6 +121,34 @@ select pg_temp.check('unknown referrer is ignored',
 update public.users set referrer_id = 1002 where id = 1003;
 
 -- --------------------------------------------------------------------------
+-- Onboarding
+-- --------------------------------------------------------------------------
+select pg_temp.act_as(1001);
+select pg_temp.check('a new user has not completed onboarding',
+  (select onboarded_at is null from public.users where id = 1001));
+
+select public.complete_onboarding();
+select pg_temp.check('completing onboarding stamps the user row',
+  (select onboarded_at is not null from public.users where id = 1001));
+
+-- Calling it twice must not move the timestamp (it is a "first seen" marker).
+create temporary table t_onboarded as
+  select onboarded_at from public.users where id = 1001;
+select public.complete_onboarding();
+select pg_temp.check('completing onboarding twice keeps the original timestamp',
+  (select onboarded_at from public.users where id = 1001)
+    = (select onboarded_at from t_onboarded));
+
+select pg_temp.check('onboarding one user does not affect another',
+  (select onboarded_at is null from public.users where id = 1002));
+
+select pg_temp.act_as(null);
+select pg_temp.check_raises(
+  'complete_onboarding rejects anonymous callers',
+  $$select public.complete_onboarding()$$,
+  'Not authenticated');
+
+-- --------------------------------------------------------------------------
 -- Step syncing: the ceilings are the whole point
 -- --------------------------------------------------------------------------
 select pg_temp.act_as(1001);

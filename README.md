@@ -95,6 +95,13 @@ path PostgREST uses in production.
 
 ## Core mechanics
 
+- **Onboarding**: a three-step intro on first launch explains the earning
+  loop, then asks for motion and location access one at a time, each with the
+  reason stated. Both are skippable — neither blocks entry. Completion is
+  recorded in `users.onboarded_at` rather than localStorage, so it survives a
+  new device. The motion prompt is deliberately wired to a button: iOS only
+  honours `DeviceMotionEvent.requestPermission()` inside a user gesture, so
+  requesting it from an effect silently fails and no steps are ever counted.
 - **Steps → Points**: `useSteps` counts steps via `DeviceMotion` peak
   detection; every 1,000 steps converts to 100 PTS. Progress syncs to
   Supabase via `sync_step_activity`, which also updates the daily streak and

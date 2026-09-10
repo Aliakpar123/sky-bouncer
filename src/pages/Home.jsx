@@ -2,20 +2,15 @@ import { useEffect, useRef } from 'react';
 import Header from '../components/layout/Header';
 import StepsRing from '../components/home/StepsRing';
 import DailyStreak from '../components/home/DailyStreak';
-import { useSteps } from '../hooks/useSteps';
 import { useUser } from '../context/UserContext';
 import { supabase } from '../lib/supabase';
 
 const SYNC_INTERVAL_MS = 30000;
 
-export default function Home() {
+export default function Home({ steps: motion }) {
   const { profile, setProfile } = useUser();
-  const { steps, pointsEarned, supported, permission, requestPermission } = useSteps();
+  const { steps, pointsEarned, supported, permission, requestPermission } = motion;
   const lastSyncedSteps = useRef(0);
-
-  useEffect(() => {
-    if (permission === 'unknown' && supported) requestPermission();
-  }, [permission, supported, requestPermission]);
 
   useEffect(() => {
     if (!profile) return undefined;
@@ -47,7 +42,7 @@ export default function Home() {
             Motion sensors unavailable on this device — steps won't be tracked automatically.
           </p>
         )}
-        {supported && permission === 'denied' && (
+        {supported && permission !== 'granted' && (
           <button
             type="button"
             onClick={requestPermission}
