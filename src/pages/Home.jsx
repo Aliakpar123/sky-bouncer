@@ -11,7 +11,7 @@ const SYNC_INTERVAL_MS = 30000;
 export default function Home({ steps: motion }) {
   const { profile, setProfile } = useUser();
   const { steps, supported, permission, requestPermission } = motion;
-  const pointsEarned = pointsForSteps(steps, profile?.streak ?? 0);
+  const pointsEarned = pointsForSteps(steps, profile?.streak ?? 0, profile?.boost_expires_at);
   const lastSyncedSteps = useRef(0);
 
   useEffect(() => {
@@ -54,7 +54,10 @@ export default function Home({ steps: motion }) {
           </button>
         )}
 
-        <DailyStreak streak={profile?.streak ?? 0} />
+        <DailyStreak
+          streak={profile?.streak ?? 0}
+          boostExpiresAt={profile?.boost_expires_at}
+        />
       </main>
     </div>
   );
