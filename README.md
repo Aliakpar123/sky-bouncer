@@ -1,14 +1,16 @@
 # Pulse Radar
 
-A Web2.5 Telegram Mini App (TMA) on TON: gamified Move-to-Earn + geofenced B2B
-check-ins, a 2-tier viral referral program, and a lightweight merchant portal.
+A Web2.5 Telegram Mini App (TMA) on TON: gamified Move-to-Earn plus geofenced
+"catch the bonus" drops at partner venues, a 2-tier viral referral program, and
+a lightweight merchant portal.
 
 ## Stack
 
 - **Frontend**: React + Vite, Tailwind CSS, Lucide icons, `react-router-dom`
-- **Telegram**: `@twa-dev/sdk` (haptics, native QR scanner, `startapp` deep links, theme)
+- **Telegram**: `@twa-dev/sdk` (haptics, `startapp` deep links, theme)
 - **Web3**: `@tonconnect/ui-react` + `@ton/ton`
-- **Maps**: `react-leaflet` with dark Carto tiles
+- **Maps**: `react-leaflet` with dark Carto tiles, `@turf/distance` for geodesics
+- **Animation**: `framer-motion` (catch pulse, reward, bottom sheet)
 - **Backend**: Supabase (Postgres, RLS, RPC functions)
 - **Bot**: Node.js + grammY (`/bot`)
 
@@ -16,10 +18,10 @@ check-ins, a 2-tier viral referral program, and a lightweight merchant portal.
 
 ```
 src/
-  components/    UI building blocks (layout, home, map, offers, referral, wallet, merchant)
+  components/    UI building blocks (layout, home, map, catch, referral, wallet, merchant)
   pages/         Route-level screens wired to Supabase + Telegram
   hooks/         useSteps (DeviceMotion step counter), useGeolocation
-  lib/           supabase client, telegram helpers, geo/haversine utils
+  lib/           supabase client, telegram helpers, geo/catch-state utils
   context/       UserContext — bootstraps the Telegram user + referral attribution
 supabase/
   schema.sql     Tables, RLS policies, and SECURITY DEFINER RPC functions
@@ -79,8 +81,9 @@ The data layer and the auth function both have tests, and they cover the
 abuse cases rather than the happy path — those are the parts worth trusting.
 
 ```bash
-# 34 RPC tests: identity, step ceilings, referral cascade, venue ownership,
-# check-in verification, redemption. Needs a scratch Postgres 16 database.
+# 50 RPC tests: identity, step ceilings, referral cascade, catch anti-cheat
+# (spoofed accuracy, teleporting, daily cap, step gate), coupon lifecycle.
+# Needs a scratch Postgres 16 database.
 createdb pulse_test && npm run test:db
 
 # 10 signature tests: forged bot token, tampered user id, replay window.
@@ -109,12 +112,13 @@ path PostgREST uses in production.
 - **Referrals**: Tier 1 (direct referrer) earns 10% of a referee's earned
   points; Tier 2 (referrer's referrer) earns 5%. Attribution is captured
   once, on first launch, and never overwritten.
-- **Geofenced check-ins**: `confirm_checkin` requires both an unexpired QR
-  token minted by the venue (`generate_checkin_token`, refreshed every 60s to
-  prevent screenshot sharing) and GPS coordinates within 150m of the venue.
-- **Merchant portal**: `/merchant/:venueId` shows a rotating QR code and
-  check-in analytics (`venue_analytics`: daily/7-day check-ins, unique
-  visitors, return rate).
+- **Catch the bonus**: the radar screen unlocks a venue's button inside a 20m
+  zone (`catch_bonus`). A catch awards the venue's `reward_points` and issues
+  a 15-minute coupon code the user shows at the counter — no scanner or POS
+  integration on the merchant side.
+- **Merchant portal**: `/merchant/:venueId` redeems a customer's code and
+  shows catch analytics (`venue_analytics`: daily/7-day catches, unique
+  visitors, coupons redeemed, return rate).
 
 ## Deployment
 
@@ -139,15 +143,22 @@ data layer trusts it beyond reading the partner catalogue.
   from a device the user controls, so these ceilings bound forgery — they do
   not eliminate it. Anything of real value (a token claim, a payout) needs a
   stronger signal than accelerometer data.
-- **Check-in needs two independent factors**: a short-lived QR token that only
-  the venue owner can mint (`generate_checkin_token` is owner-restricted —
-  otherwise any user could mint a valid code for any venue), plus GPS within
-  150m. One check-in per venue per day.
-- **The QR code is rendered on-device.** The token is a bearer credential, so
-  it must never be handed to a third-party QR image service.
-- **RLS is scoped to the verified identity**: users, activities, check-ins and
-  redemptions are readable only by their owner (or the venue owner, for
-  venue-side rows). `checkin_tokens` has no select policy at all.
+- **A catch is only as trustworthy as GPS, which is weak.** Dropping the QR
+  factor for zero-friction merchant onboarding means location is now the only
+  proof of presence, and a spoofed GPS is a settings toggle away on Android.
+  `catch_bonus` layers defences instead: distance is computed server-side; an
+  accuracy reading worse than 100m is refused (so a spoofer cannot claim a
+  5km error radius and overlap every venue); a genuine accuracy reading
+  widens the radius, because a real phone at the counter often reports 30-50m
+  and would otherwise be locked out; moving between two catches faster than
+  120km/h is treated as teleporting; the day's step count must show real
+  walking; and one catch per venue per day caps the value of any bypass.
+  Every catch stores its distance and accuracy for fraud review.
+- **Coupons expire in 15 minutes and can be burned by the venue owner**
+  (`redeem_coupon`), so a screenshot is not reusable inside the window.
+- **RLS is scoped to the verified identity**: users, activities, catches and
+  coupons are readable only by their owner (or the venue owner, for venue-side
+  rows). The venue catalogue is the only public table.
 
 Known gaps, in rough priority order:
 

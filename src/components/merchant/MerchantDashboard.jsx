@@ -26,9 +26,10 @@ export default function MerchantDashboard({ venueId }) {
   if (!stats) return <p className="text-white/50 text-sm">No data yet.</p>;
 
   const cards = [
-    { label: "Today's check-ins", value: stats.checkins_today },
-    { label: 'Check-ins (7d)', value: stats.checkins_7d },
+    { label: "Today's catches", value: stats.catches_today },
+    { label: 'Catches (7d)', value: stats.catches_7d },
     { label: 'Unique visitors (7d)', value: stats.unique_visitors_7d },
+    { label: 'Coupons redeemed (7d)', value: stats.coupons_redeemed_7d },
     { label: 'Return rate', value: `${Math.round((stats.return_rate ?? 0) * 100)}%` },
   ];
 

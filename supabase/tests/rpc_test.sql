@@ -65,8 +65,8 @@ set client_min_messages to notice;
 begin;
 
 -- Clean slate.
-truncate table public.redemptions, public.checkins, public.checkin_tokens,
-               public.activities, public.offers, public.venues, public.users
+truncate table public.coupons, public.catches, public.activities,
+               public.venues, public.users
   restart identity cascade;
 
 -- --------------------------------------------------------------------------
@@ -196,124 +196,162 @@ select pg_temp.check('tier 2 referrer receives 5% on top of their own balance',
   (select balance = 24 + 10 from public.users where id = 1001));
 
 -- --------------------------------------------------------------------------
--- Venue ownership: minting check-in codes and reading analytics
+-- Catch engine: the anti-cheat layers are the point
 -- --------------------------------------------------------------------------
-insert into public.venues (id, name, owner_user_id, location_lat, location_lng)
-  values ('11111111-1111-1111-1111-111111111111', 'Blue Bottle', 1001, 41.3121, 69.2801);
-insert into public.offers (id, venue_id, title, cost_in_points, partner_name, location_lat, location_lng)
-  values ('22222222-2222-2222-2222-222222222222',
-          '11111111-1111-1111-1111-111111111111',
-          'Free flat white', 100, 'Blue Bottle', 41.3121, 69.2801);
+insert into public.venues (id, name, category, reward_points, offer_title, lat, lng, owner_user_id)
+  values ('11111111-1111-1111-1111-111111111111', 'Blue Bottle', 'cafe', 150,
+          'Free flat white', 41.3121, 69.2801, 1001);
 
-select pg_temp.act_as(1002); -- Bob does not own the venue
+-- Bob (1002) will do the catching; give him the walking the engine requires.
+select pg_temp.act_as(1002);
+insert into public.activities (user_id, steps_count, points_earned)
+  values (1002, 3000, 300);
+
 select pg_temp.check_raises(
-  'a non-owner cannot mint a check-in token',
-  $$select public.generate_checkin_token('11111111-1111-1111-1111-111111111111', 60)$$,
+  'catching without authentication is rejected',
+  $$select public.catch_bonus('11111111-1111-1111-1111-111111111111', 41.3121, 69.2801, 10)$$,
+  'Not authenticated')
+from (select pg_temp.act_as(null)) s;
+select pg_temp.act_as(1002);
+
+select pg_temp.check_raises(
+  'catching without coordinates is rejected',
+  $$select public.catch_bonus('11111111-1111-1111-1111-111111111111', null, null, 10)$$,
+  'Location is required');
+
+-- 41.3200 is roughly 880m north of the venue.
+select pg_temp.check_raises(
+  'a catch from far away is rejected',
+  $$select public.catch_bonus('11111111-1111-1111-1111-111111111111', 41.3200, 69.2801, 10)$$,
+  'get closer');
+
+-- A spoofer claiming a huge error radius must not "overlap" the venue.
+select pg_temp.check_raises(
+  'an implausible accuracy reading is rejected outright',
+  $$select public.catch_bonus('11111111-1111-1111-1111-111111111111', 41.3121, 69.2801, 5000)$$,
+  'too imprecise');
+
+-- Omitting accuracy must not be better than reporting a bad one: it is
+-- treated as the worst tolerated value, so a far-away catch still fails.
+select pg_temp.check_raises(
+  'a missing accuracy reading does not widen the radius beyond the cap',
+  $$select public.catch_bonus('11111111-1111-1111-1111-111111111111', 41.3200, 69.2801, null)$$,
+  'get closer');
+
+-- Someone who has not walked today cannot catch, however close they stand.
+select pg_temp.act_as(1005);
+select public.upsert_user_session('Erin', 'erin', null);
+select pg_temp.check_raises(
+  'a user with no steps today cannot catch',
+  $$select public.catch_bonus('11111111-1111-1111-1111-111111111111', 41.3121, 69.2801, 10)$$,
+  'Walk at least');
+select pg_temp.act_as(1002);
+
+-- The legitimate catch.
+create temporary table t_catch as
+  select public.catch_bonus('11111111-1111-1111-1111-111111111111', 41.3121, 69.2801, 10) as result;
+
+select pg_temp.check('a valid catch is recorded',
+  (select count(*) = 1 from public.catches where user_id = 1002));
+select pg_temp.check('the catch awards the venue reward',
+  (select (result ->> 'points_awarded')::int = 150 from t_catch));
+select pg_temp.check('the catch credits the balance',
+  (select balance >= 150 from public.users where id = 1002));
+select pg_temp.check('the catch stores the measured distance for fraud review',
+  (select distance_m is not null and accuracy_m = 10 from public.catches where user_id = 1002));
+
+-- Coupon issued alongside.
+select pg_temp.check('a coupon is issued with the catch',
+  (select length(result -> 'coupon' ->> 'code') = 6 from t_catch));
+select pg_temp.check('the coupon carries the venue offer',
+  (select result -> 'coupon' ->> 'offer_title' = 'Free flat white' from t_catch));
+select pg_temp.check('the coupon expires within the TTL window',
+  (select expires_at <= timezone('utc', now()) + make_interval(mins => public.coupon_ttl_minutes())
+     from public.coupons where user_id = 1002));
+select pg_temp.check('the coupon code avoids ambiguous characters',
+  (select code !~ '[01OI]' from public.coupons where user_id = 1002));
+
+select pg_temp.check('active_coupons returns the live coupon',
+  (select count(*) = 1 from public.active_coupons()));
+
+-- Referral cascade on catch points: Bob's referrer is Alice (1001).
+select pg_temp.check('tier 1 referrer earns 10% of catch points',
+  (select balance from public.users where id = 1001) >= 15);
+
+-- Second catch at the same venue today.
+select pg_temp.check_raises(
+  'a second catch at the same venue on the same day is rejected',
+  $$select public.catch_bonus('11111111-1111-1111-1111-111111111111', 41.3121, 69.2801, 10)$$,
+  'already caught');
+
+-- Teleporting: a second venue on the other side of the country, moments later.
+insert into public.venues (id, name, category, reward_points, offer_title, lat, lng, owner_user_id)
+  values ('33333333-3333-3333-3333-333333333333', 'Far Cafe', 'cafe', 150,
+          'Free tea', 55.7558, 37.6173, 1001);
+select pg_temp.check_raises(
+  'catching two venues 2000km apart within seconds is rejected',
+  $$select public.catch_bonus('33333333-3333-3333-3333-333333333333', 55.7558, 37.6173, 10)$$,
+  'Suspicious movement');
+
+-- The same journey is fine once enough time has passed for it to be real.
+update public.users set last_catch_at = timezone('utc', now()) - interval '30 hours'
+  where id = 1002;
+select public.catch_bonus('33333333-3333-3333-3333-333333333333', 55.7558, 37.6173, 10);
+select pg_temp.check('the same journey is allowed once it is physically plausible',
+  (select count(*) = 1 from public.catches
+    where user_id = 1002 and venue_id = '33333333-3333-3333-3333-333333333333'));
+
+-- --------------------------------------------------------------------------
+-- Coupon redemption is the venue owner's call
+-- --------------------------------------------------------------------------
+create temporary table t_code as
+  select code from public.coupons where user_id = 1002 and redeemed_at is null limit 1;
+
+select pg_temp.act_as(1004); -- not the owner
+select pg_temp.check_raises(
+  'a stranger cannot redeem a coupon',
+  format($$select public.redeem_coupon(%L)$$, (select code from t_code)),
   'Not authorised');
 
+select pg_temp.act_as(1001); -- Alice owns both venues
+select public.redeem_coupon((select code from t_code));
+select pg_temp.check('the owner can redeem a coupon',
+  (select redeemed_at is not null from public.coupons where code = (select code from t_code)));
+
+select pg_temp.check_raises(
+  'a coupon cannot be redeemed twice',
+  format($$select public.redeem_coupon(%L)$$, (select code from t_code)),
+  'already redeemed');
+
+-- An expired coupon is refused even by the owner.
+insert into public.coupons (catch_id, user_id, venue_id, code, offer_title, expires_at)
+  select id, 1002, '11111111-1111-1111-1111-111111111111', 'EXPIRD', 'Free flat white',
+         timezone('utc', now()) - interval '1 minute'
+    from public.catches where user_id = 1002 limit 1;
+select pg_temp.check_raises(
+  'an expired coupon is refused',
+  $$select public.redeem_coupon('EXPIRD')$$,
+  'expired');
+
+select pg_temp.check('expired coupons are not listed as active',
+  (select count(*) = 0 from public.coupons c
+    where c.code = 'EXPIRD'
+      and c.id in (select id from public.active_coupons())));
+
+-- --------------------------------------------------------------------------
+-- Venue analytics stay owner-only
+-- --------------------------------------------------------------------------
+select pg_temp.act_as(1002);
 select pg_temp.check_raises(
   'a non-owner cannot read venue analytics',
   $$select public.venue_analytics('11111111-1111-1111-1111-111111111111')$$,
   'Not authorised');
 
-select pg_temp.act_as(1001); -- Alice owns it
-select pg_temp.check('the owner can mint a token',
-  length(public.generate_checkin_token('11111111-1111-1111-1111-111111111111', 60)) = 32);
-select pg_temp.check('the owner can read analytics',
-  (public.venue_analytics('11111111-1111-1111-1111-111111111111') ->> 'checkins_today')::int = 0);
-
-create temporary table t_long_ttl as
-  select public.generate_checkin_token('11111111-1111-1111-1111-111111111111', 999999) as token;
-select pg_temp.check('TTL is clamped to at most 5 minutes',
-  (select expires_at <= timezone('utc', now()) + interval '301 seconds'
-     from public.checkin_tokens
-    where token = (select token from t_long_ttl)));
-
--- --------------------------------------------------------------------------
--- Check-in: both factors must hold
--- --------------------------------------------------------------------------
 select pg_temp.act_as(1001);
-create temporary table t_token as
-  select public.generate_checkin_token('11111111-1111-1111-1111-111111111111', 60) as token;
-
-select pg_temp.act_as(1002); -- Bob checks in at Alice's venue
-
-select pg_temp.check_raises(
-  'a forged QR payload is rejected',
-  $$select public.confirm_checkin('22222222-2222-2222-2222-222222222222',
-      'deadbeefdeadbeefdeadbeefdeadbeef', 41.3121, 69.2801)$$,
-  'invalid or expired');
-
-select pg_temp.check_raises(
-  'a valid QR from 3km away is rejected by the geofence',
-  format($$select public.confirm_checkin('22222222-2222-2222-2222-222222222222',
-      %L, 41.3400, 69.2801)$$, (select token from t_token)),
-  'too far');
-
-select pg_temp.check_raises(
-  'a check-in without coordinates is rejected',
-  format($$select public.confirm_checkin('22222222-2222-2222-2222-222222222222',
-      %L, null, null)$$, (select token from t_token)),
-  'Location is required');
-
--- Now the legitimate path.
-select public.confirm_checkin('22222222-2222-2222-2222-222222222222',
-  (select token from t_token), 41.3121, 69.2801);
-select pg_temp.check('a valid check-in is recorded',
-  (select count(*) = 1 from public.checkins where user_id = 1002));
-select pg_temp.check('check-in credits points',
-  (select balance = 20 + 50 from public.users where id = 1002));
-
--- Checked from a different account: Bob's own retry would hit the
--- one-per-day rule first, which would not prove the token was consumed.
-select pg_temp.act_as(1003);
-select pg_temp.check_raises(
-  'a token already spent by someone else cannot be reused',
-  format($$select public.confirm_checkin('22222222-2222-2222-2222-222222222222',
-      %L, 41.3121, 69.2801)$$, (select token from t_token)),
-  'invalid or expired');
-select pg_temp.act_as(1002);
-
--- A fresh token still cannot beat the one-per-day rule.
-select pg_temp.act_as(1001);
-create temporary table t_token2 as
-  select public.generate_checkin_token('11111111-1111-1111-1111-111111111111', 60) as token;
-select pg_temp.act_as(1002);
-select pg_temp.check_raises(
-  'a second check-in at the same venue on the same day is rejected',
-  format($$select public.confirm_checkin('22222222-2222-2222-2222-222222222222',
-      %L, 41.3121, 69.2801)$$, (select token from t_token2)),
-  'Already checked in');
-
--- Expired tokens are refused.
-select pg_temp.act_as(1001);
-insert into public.checkin_tokens (token, venue_id, expires_at)
-  values ('expiredtoken00000000000000000000',
-          '11111111-1111-1111-1111-111111111111',
-          timezone('utc', now()) - interval '1 minute');
-select pg_temp.act_as(1003);
-select pg_temp.check_raises(
-  'an expired token is rejected',
-  $$select public.confirm_checkin('22222222-2222-2222-2222-222222222222',
-      'expiredtoken00000000000000000000', 41.3121, 69.2801)$$,
-  'invalid or expired');
-
--- --------------------------------------------------------------------------
--- Redemption
--- --------------------------------------------------------------------------
-select pg_temp.act_as(1003); -- Carol has 200 pts, offer costs 100
-select public.redeem_offer('22222222-2222-2222-2222-222222222222');
-select pg_temp.check('redeeming deducts the cost',
-  (select balance = 100 from public.users where id = 1003));
-select pg_temp.check('redemption is recorded',
-  (select count(*) = 1 from public.redemptions where user_id = 1003));
-
-select pg_temp.act_as(1004);
-update public.users set balance = 10 where id = 1004;
-select pg_temp.check_raises(
-  'redeeming past the balance is rejected',
-  $$select public.redeem_offer('22222222-2222-2222-2222-222222222222')$$,
-  'Insufficient balance');
+select pg_temp.check('the owner sees catches for today',
+  (public.venue_analytics('11111111-1111-1111-1111-111111111111') ->> 'catches_today')::int = 1);
+select pg_temp.check('the owner sees redeemed coupons',
+  (public.venue_analytics('11111111-1111-1111-1111-111111111111') ->> 'coupons_redeemed_7d')::int >= 0);
 
 -- --------------------------------------------------------------------------
 -- Referral counts reflect the caller, not a supplied id

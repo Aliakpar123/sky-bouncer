@@ -1,11 +1,11 @@
-import { Home, Map, Gift, Users, Wallet } from 'lucide-react';
+import { Home, Radar, Ticket, Users, Wallet } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
 import { haptic } from '../../lib/telegram';
 
 const TABS = [
   { to: '/', label: 'Home', icon: Home, end: true },
-  { to: '/map', label: 'Map', icon: Map },
-  { to: '/offers', label: 'Offers', icon: Gift },
+  { to: '/map', label: 'Radar', icon: Radar },
+  { to: '/offers', label: 'Coupons', icon: Ticket },
   { to: '/referral', label: 'Invite', icon: Users },
   { to: '/wallet', label: 'Wallet', icon: Wallet },
 ];

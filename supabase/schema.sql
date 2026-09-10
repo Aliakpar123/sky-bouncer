@@ -12,6 +12,33 @@
 create extension if not exists pgcrypto;
 
 -- ============================================================================
+-- Migration from the QR check-in model
+-- ============================================================================
+-- The catch engine replaces per-visit QR tokens with geofence + anti-cheat, so
+-- the tables behind that flow are gone.
+--
+-- DESTRUCTIVE: this drops check-in history and the old offer catalogue. It is
+-- written for a project that has not launched yet. If yours holds data you
+-- care about, export it before applying.
+drop table if exists public.redemptions cascade;
+drop table if exists public.checkins cascade;
+drop table if exists public.checkin_tokens cascade;
+drop table if exists public.offers cascade;
+
+-- `venues` predates the new spec under different column names.
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'venues' and column_name = 'location_lat'
+  ) then
+    alter table public.venues rename column location_lat to lat;
+    alter table public.venues rename column location_lng to lng;
+  end if;
+end
+$$;
+
+-- ============================================================================
 -- Tables
 -- ============================================================================
 
@@ -26,32 +53,34 @@ create table if not exists public.users (
   last_active_date date,
   last_step_sync_at timestamptz,
   onboarded_at timestamptz,
+  -- Last catch position, kept for the teleport check in catch_bonus.
+  last_catch_lat double precision,
+  last_catch_lng double precision,
+  last_catch_at timestamptz,
   created_at timestamptz not null default timezone('utc', now())
 );
 
--- Kept separate from the create so existing projects pick it up on re-apply.
+-- Kept separate from the create so existing projects pick these up on re-apply.
 alter table public.users add column if not exists onboarded_at timestamptz;
+alter table public.users add column if not exists last_catch_lat double precision;
+alter table public.users add column if not exists last_catch_lng double precision;
+alter table public.users add column if not exists last_catch_at timestamptz;
 
 create table if not exists public.venues (
   id uuid primary key default gen_random_uuid(),
   name text not null,
+  category text,
+  reward_points int not null default 150 check (reward_points >= 0),
+  offer_title text not null,
+  lat double precision not null,
+  lng double precision not null,
   owner_user_id bigint references public.users(id),
-  location_lat double precision not null,
-  location_lng double precision not null,
   created_at timestamptz not null default timezone('utc', now())
 );
 
-create table if not exists public.offers (
-  id uuid primary key default gen_random_uuid(),
-  venue_id uuid references public.venues(id) on delete cascade,
-  title text not null,
-  description text,
-  cost_in_points bigint not null check (cost_in_points >= 0),
-  partner_name text not null,
-  location_lat double precision,
-  location_lng double precision,
-  created_at timestamptz not null default timezone('utc', now())
-);
+alter table public.venues add column if not exists category text;
+alter table public.venues add column if not exists reward_points int not null default 150;
+alter table public.venues add column if not exists offer_title text;
 
 create table if not exists public.activities (
   id uuid primary key default gen_random_uuid(),
@@ -61,39 +90,43 @@ create table if not exists public.activities (
   created_at timestamptz not null default timezone('utc', now())
 );
 
-create table if not exists public.checkin_tokens (
-  token text primary key,
-  venue_id uuid not null references public.venues(id) on delete cascade,
-  expires_at timestamptz not null,
-  used_by_user_id bigint references public.users(id),
-  created_at timestamptz not null default timezone('utc', now())
-);
-
-create table if not exists public.checkins (
+-- One row per successful bonus catch. `distance_m` and `accuracy_m` are kept
+-- for fraud review: a stream of catches at implausible accuracy is the
+-- clearest signal of a spoofed device.
+create table if not exists public.catches (
   id uuid primary key default gen_random_uuid(),
   user_id bigint not null references public.users(id) on delete cascade,
-  offer_id uuid references public.offers(id),
-  venue_id uuid not null references public.venues(id),
+  venue_id uuid not null references public.venues(id) on delete cascade,
+  points_awarded int not null,
   lat double precision not null,
   lng double precision not null,
-  points_earned bigint not null default 0,
+  distance_m double precision,
+  accuracy_m double precision,
   created_at timestamptz not null default timezone('utc', now())
 );
 
-create table if not exists public.redemptions (
+-- Short-lived proof the user shows at the counter. Deliberately human-
+-- readable: at MVP the merchant reads it off the screen, with no scanner or
+-- POS integration to install.
+create table if not exists public.coupons (
   id uuid primary key default gen_random_uuid(),
+  catch_id uuid not null references public.catches(id) on delete cascade,
   user_id bigint not null references public.users(id) on delete cascade,
-  offer_id uuid not null references public.offers(id),
-  points_spent bigint not null,
+  venue_id uuid not null references public.venues(id) on delete cascade,
+  code text not null unique,
+  offer_title text not null,
+  expires_at timestamptz not null,
+  redeemed_at timestamptz,
   created_at timestamptz not null default timezone('utc', now())
 );
 
 create index if not exists idx_users_referrer_id on public.users(referrer_id);
 create index if not exists idx_activities_user_id on public.activities(user_id);
 create index if not exists idx_activities_user_day on public.activities(user_id, created_at);
-create index if not exists idx_checkins_venue_id on public.checkins(venue_id);
-create index if not exists idx_checkins_user_id on public.checkins(user_id);
-create index if not exists idx_offers_venue_id on public.offers(venue_id);
+create index if not exists idx_catches_user_day on public.catches(user_id, created_at);
+create index if not exists idx_catches_venue_id on public.catches(venue_id);
+create index if not exists idx_coupons_user_id on public.coupons(user_id);
+create index if not exists idx_coupons_code on public.coupons(code);
 create index if not exists idx_venues_owner on public.venues(owner_user_id);
 
 -- ============================================================================
@@ -131,6 +164,47 @@ end;
 $$;
 
 -- ============================================================================
+-- Tuning constants
+-- ============================================================================
+-- Kept as functions so the catch rules live in one place and the tests can
+-- assert against the same values the engine uses.
+
+-- The spec's radar zone. Effective radius is this plus the reported GPS
+-- accuracy — see catch_bonus for why.
+create or replace function public.catch_radius_m() returns double precision
+  language sql immutable as $$ select 20::double precision $$;
+
+-- Beyond this, a reading is too vague to prove presence anywhere.
+create or replace function public.max_gps_accuracy_m() returns double precision
+  language sql immutable as $$ select 100::double precision $$;
+
+-- Faster than city driving between two catches means the position is forged.
+create or replace function public.max_travel_speed_kmh() returns double precision
+  language sql immutable as $$ select 120::double precision $$;
+
+-- "Move to earn": a catch has to be preceded by actual walking.
+create or replace function public.min_steps_for_catch() returns int
+  language sql immutable as $$ select 500 $$;
+
+create or replace function public.coupon_ttl_minutes() returns int
+  language sql immutable as $$ select 15 $$;
+
+-- Great-circle distance in metres.
+create or replace function public.distance_m(
+  p_lat1 double precision, p_lng1 double precision,
+  p_lat2 double precision, p_lng2 double precision
+) returns double precision
+language sql
+immutable
+as $$
+  select 6371000 * 2 * asin(sqrt(
+    sin(radians(p_lat2 - p_lat1) / 2) ^ 2 +
+    cos(radians(p_lat1)) * cos(radians(p_lat2)) *
+    sin(radians(p_lng2 - p_lng1) / 2) ^ 2
+  ));
+$$;
+
+-- ============================================================================
 -- Row Level Security
 -- ============================================================================
 -- No table grants INSERT/UPDATE/DELETE to clients; all mutation flows through
@@ -138,43 +212,37 @@ $$;
 
 alter table public.users enable row level security;
 alter table public.venues enable row level security;
-alter table public.offers enable row level security;
 alter table public.activities enable row level security;
-alter table public.checkin_tokens enable row level security;
-alter table public.checkins enable row level security;
-alter table public.redemptions enable row level security;
+alter table public.catches enable row level security;
+alter table public.coupons enable row level security;
 
--- Dropped so the whole script stays re-runnable. The first group is the
--- pre-JWT policy names, kept so an existing project upgrades cleanly.
-drop policy if exists "offers are publicly readable" on public.offers;
+-- Dropped so the whole script stays re-runnable. The first groups are older
+-- policy names (pre-JWT, and the pre-catch check-in model), kept so an
+-- existing project upgrades cleanly.
 drop policy if exists "venues are publicly readable" on public.venues;
 drop policy if exists "users are readable" on public.users;
 drop policy if exists "activities are readable" on public.activities;
-drop policy if exists "checkins are readable" on public.checkins;
-drop policy if exists "redemptions are readable" on public.redemptions;
 
-drop policy if exists "offers are readable by everyone" on public.offers;
 drop policy if exists "venues are readable by everyone" on public.venues;
 drop policy if exists "users read own row" on public.users;
 drop policy if exists "activities read own rows" on public.activities;
-drop policy if exists "checkins read own rows" on public.checkins;
-drop policy if exists "redemptions read own rows" on public.redemptions;
+drop policy if exists "catches read own rows" on public.catches;
+drop policy if exists "coupons read own rows" on public.coupons;
 
--- The partner catalogue is public marketing data.
-create policy "offers are readable by everyone" on public.offers
-  for select using (true);
-
+-- The venue catalogue is public marketing data — the map has to render it
+-- before the user has gone anywhere.
 create policy "venues are readable by everyone" on public.venues
   for select using (true);
 
--- Everything user-scoped is readable only by its owner.
+-- Everything user-scoped is readable only by its owner (or the venue owner,
+-- for venue-side rows).
 create policy "users read own row" on public.users
   for select using (id = public.current_telegram_id());
 
 create policy "activities read own rows" on public.activities
   for select using (user_id = public.current_telegram_id());
 
-create policy "checkins read own rows" on public.checkins
+create policy "catches read own rows" on public.catches
   for select using (
     user_id = public.current_telegram_id()
     or venue_id in (
@@ -182,18 +250,13 @@ create policy "checkins read own rows" on public.checkins
     )
   );
 
-create policy "redemptions read own rows" on public.redemptions
+create policy "coupons read own rows" on public.coupons
   for select using (
     user_id = public.current_telegram_id()
-    or offer_id in (
-      select o.id from public.offers o
-      join public.venues v on v.id = o.venue_id
-      where v.owner_user_id = public.current_telegram_id()
+    or venue_id in (
+      select id from public.venues where owner_user_id = public.current_telegram_id()
     )
   );
-
--- checkin_tokens is never read directly by clients — `confirm_checkin`
--- validates tokens internally, so no select policy is granted at all.
 
 -- ============================================================================
 -- RPC: upsert_user_session
@@ -399,169 +462,238 @@ as $$
 $$;
 
 -- ============================================================================
--- RPC: generate_checkin_token
--- Mints a short-lived QR payload. Restricted to the venue's owner — otherwise
--- any user could mint a valid token for any venue and check in remotely,
--- defeating the QR half of the verification entirely.
+-- RPC: catch_bonus
+-- The core loop: the user is physically at a venue and taps to collect.
+--
+-- Every input here comes from a device the user controls, so the geofence
+-- alone proves nothing — a spoofed GPS is a settings toggle away on Android.
+-- These layers each raise the cost of faking a visit:
+--
+--   * distance is computed server-side from the venue's stored coordinates;
+--   * an implausible accuracy reading is refused outright, so a spoofer
+--     cannot claim a 5km error radius and "overlap" every venue in the city;
+--   * a genuine accuracy reading widens the radius, because a real phone at
+--     the counter often reports 30-50m of error and would otherwise be
+--     locked out;
+--   * moving between two catches faster than a car is treated as teleporting;
+--   * the day's step count must show the user actually walked somewhere;
+--   * one catch per venue per day caps the value of any single bypass.
 -- ============================================================================
-create or replace function public.generate_checkin_token(
+create or replace function public.catch_bonus(
   p_venue_id uuid,
-  p_ttl_seconds int default 60
-) returns text
+  p_lat double precision,
+  p_lng double precision,
+  p_accuracy_m double precision default null
+) returns json
 language plpgsql
 security definer
 set search_path = public, extensions
 as $$
 declare
   v_id bigint := public.current_telegram_id();
-  v_token text;
-begin
-  if v_id is null then
-    raise exception 'Not authenticated';
-  end if;
-
-  if not exists (
-    select 1 from public.venues where id = p_venue_id and owner_user_id = v_id
-  ) then
-    raise exception 'Not authorised for this venue';
-  end if;
-
-  -- Bound the TTL so a caller cannot mint a effectively permanent code.
-  p_ttl_seconds := least(greatest(coalesce(p_ttl_seconds, 60), 15), 300);
-
-  v_token := encode(gen_random_bytes(16), 'hex');
-
-  insert into public.checkin_tokens (token, venue_id, expires_at)
-    values (v_token, p_venue_id, timezone('utc', now()) + make_interval(secs => p_ttl_seconds));
-
-  delete from public.checkin_tokens
-    where venue_id = p_venue_id and expires_at < timezone('utc', now());
-
-  return v_token;
-end;
-$$;
-
--- ============================================================================
--- RPC: confirm_checkin
--- Dual verification: the QR token must belong to the offer's venue and be
--- unexpired/unused, AND the reported coordinates must be within the geofence.
--- ============================================================================
-create or replace function public.confirm_checkin(
-  p_offer_id uuid,
-  p_qr_payload text,
-  p_lat double precision,
-  p_lng double precision
-) returns public.checkins
-language plpgsql
-security definer
-set search_path = public
-as $$
-declare
-  v_id bigint := public.current_telegram_id();
-  v_venue_id uuid;
-  v_venue_lat double precision;
-  v_venue_lng double precision;
+  v_user public.users;
+  v_venue public.venues;
   v_distance_m double precision;
-  v_points bigint := 50;
-  v_checkin public.checkins;
+  v_allowed_radius double precision;
+  v_steps_today int;
+  v_elapsed_seconds double precision;
+  v_travelled_m double precision;
+  v_speed_kmh double precision;
+  v_catch public.catches;
+  v_coupon public.coupons;
+  v_code text;
 begin
   if v_id is null then
     raise exception 'Not authenticated';
   end if;
   if p_lat is null or p_lng is null then
-    raise exception 'Location is required to check in';
+    raise exception 'Location is required to catch a bonus';
   end if;
 
-  select o.venue_id, v.location_lat, v.location_lng
-    into v_venue_id, v_venue_lat, v_venue_lng
-    from public.offers o
-    join public.venues v on v.id = o.venue_id
-    where o.id = p_offer_id;
-
-  if v_venue_id is null then
-    raise exception 'Offer % has no linked venue', p_offer_id;
-  end if;
-
-  -- One check-in per venue per day keeps a single valid QR from being farmed.
-  if exists (
-    select 1 from public.checkins
-    where user_id = v_id and venue_id = v_venue_id and created_at >= current_date
-  ) then
-    raise exception 'Already checked in at this venue today';
-  end if;
-
-  perform 1 from public.checkin_tokens
-    where token = p_qr_payload
-      and venue_id = v_venue_id
-      and expires_at > timezone('utc', now())
-      and used_by_user_id is null
-    for update;
-
+  select * into v_user from public.users where id = v_id for update;
   if not found then
-    raise exception 'QR code is invalid or expired';
+    raise exception 'User not found';
   end if;
 
-  v_distance_m := 6371000 * 2 * asin(sqrt(
-    sin(radians(p_lat - v_venue_lat) / 2) ^ 2 +
-    cos(radians(v_venue_lat)) * cos(radians(p_lat)) *
-    sin(radians(p_lng - v_venue_lng) / 2) ^ 2
-  ));
-
-  if v_distance_m > 150 then
-    raise exception 'You are too far from the venue (%m away)', round(v_distance_m);
+  select * into v_venue from public.venues where id = p_venue_id;
+  if not found then
+    raise exception 'Venue not found';
   end if;
 
-  update public.checkin_tokens set used_by_user_id = v_id where token = p_qr_payload;
+  -- A missing accuracy reading is treated as the worst tolerated case rather
+  -- than as "perfect", so omitting the field is never an advantage.
+  if p_accuracy_m is null then
+    p_accuracy_m := public.max_gps_accuracy_m();
+  end if;
+  if p_accuracy_m < 0 or p_accuracy_m > public.max_gps_accuracy_m() then
+    raise exception 'Your location is too imprecise right now — move outside and try again';
+  end if;
 
-  insert into public.checkins (user_id, offer_id, venue_id, lat, lng, points_earned)
-    values (v_id, p_offer_id, v_venue_id, p_lat, p_lng, v_points)
-    returning * into v_checkin;
+  v_distance_m := public.distance_m(p_lat, p_lng, v_venue.lat, v_venue.lng);
+  v_allowed_radius := public.catch_radius_m() + p_accuracy_m;
 
-  update public.users set balance = balance + v_points where id = v_id;
+  if v_distance_m > v_allowed_radius then
+    raise exception 'You are % metres away — get closer to catch this bonus',
+      round(v_distance_m - public.catch_radius_m());
+  end if;
 
-  return v_checkin;
+  if exists (
+    select 1 from public.catches
+    where user_id = v_id and venue_id = p_venue_id and created_at >= current_date
+  ) then
+    raise exception 'You already caught this bonus today';
+  end if;
+
+  select coalesce(sum(steps_count), 0) into v_steps_today
+    from public.activities
+    where user_id = v_id and created_at >= current_date;
+  if v_steps_today < public.min_steps_for_catch() then
+    raise exception 'Walk at least % steps today before catching a bonus',
+      public.min_steps_for_catch();
+  end if;
+
+  -- Teleport check against the previous catch.
+  if v_user.last_catch_at is not null
+     and v_user.last_catch_lat is not null then
+    v_elapsed_seconds := greatest(
+      extract(epoch from (timezone('utc', now()) - v_user.last_catch_at)), 1
+    );
+    v_travelled_m := public.distance_m(
+      v_user.last_catch_lat, v_user.last_catch_lng, p_lat, p_lng
+    );
+    v_speed_kmh := (v_travelled_m / v_elapsed_seconds) * 3.6;
+
+    if v_speed_kmh > public.max_travel_speed_kmh() then
+      raise exception 'Suspicious movement detected — please try again shortly';
+    end if;
+  end if;
+
+  insert into public.catches (
+    user_id, venue_id, points_awarded, lat, lng, distance_m, accuracy_m
+  )
+  values (
+    v_id, p_venue_id, v_venue.reward_points, p_lat, p_lng, v_distance_m, p_accuracy_m
+  )
+  returning * into v_catch;
+
+  update public.users
+    set balance = balance + v_venue.reward_points,
+        last_catch_lat = p_lat,
+        last_catch_lng = p_lng,
+        last_catch_at = timezone('utc', now())
+    where id = v_id
+    returning * into v_user;
+
+  -- Six characters from an unambiguous alphabet (no 0/O/1/I), because a
+  -- cashier reads this off a phone screen.
+  v_code := (
+    select string_agg(
+      substr('23456789ABCDEFGHJKLMNPQRSTUVWXYZ',
+             1 + floor(random() * 32)::int, 1), ''
+    )
+    from generate_series(1, 6)
+  );
+
+  insert into public.coupons (
+    catch_id, user_id, venue_id, code, offer_title, expires_at
+  )
+  values (
+    v_catch.id, v_id, p_venue_id, v_code, v_venue.offer_title,
+    timezone('utc', now()) + make_interval(mins => public.coupon_ttl_minutes())
+  )
+  returning * into v_coupon;
+
+  -- Referral cascade on catch points: 10% to the referrer, 5% above them.
+  if v_user.referrer_id is not null then
+    update public.users
+      set balance = balance + floor(v_venue.reward_points * 0.10)
+      where id = v_user.referrer_id;
+
+    update public.users
+      set balance = balance + floor(v_venue.reward_points * 0.05)
+      where id = (select referrer_id from public.users where id = v_user.referrer_id)
+        and id <> v_id;
+  end if;
+
+  return json_build_object(
+    'points_awarded', v_venue.reward_points,
+    'balance', v_user.balance,
+    'distance_m', round(v_distance_m),
+    'coupon', json_build_object(
+      'code', v_coupon.code,
+      'offer_title', v_coupon.offer_title,
+      'expires_at', v_coupon.expires_at
+    )
+  );
 end;
 $$;
 
 -- ============================================================================
--- RPC: redeem_offer
+-- RPC: active_coupons
+-- The coupon screen after a catch, and on relaunch within the window.
 -- ============================================================================
-create or replace function public.redeem_offer(p_offer_id uuid)
-returns public.redemptions
+create or replace function public.active_coupons()
+returns setof public.coupons
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select * from public.coupons
+  where user_id = public.current_telegram_id()
+    and public.current_telegram_id() is not null
+    and redeemed_at is null
+    and expires_at > timezone('utc', now())
+  order by expires_at;
+$$;
+
+-- ============================================================================
+-- RPC: redeem_coupon
+-- Called by the venue owner to burn a code the customer just showed. Keeps a
+-- screenshot from being reused inside the validity window.
+-- ============================================================================
+create or replace function public.redeem_coupon(p_code text)
+returns public.coupons
 language plpgsql
 security definer
 set search_path = public
 as $$
 declare
   v_id bigint := public.current_telegram_id();
-  v_cost bigint;
-  v_balance bigint;
-  v_redemption public.redemptions;
+  v_coupon public.coupons;
 begin
   if v_id is null then
     raise exception 'Not authenticated';
   end if;
 
-  select cost_in_points into v_cost from public.offers where id = p_offer_id;
-  if v_cost is null then
-    raise exception 'Offer not found';
+  select * into v_coupon
+    from public.coupons
+    where upper(code) = upper(trim(p_code))
+    for update;
+
+  if not found then
+    raise exception 'Coupon not found';
   end if;
 
-  select balance into v_balance from public.users where id = v_id for update;
-  if v_balance is null then
-    raise exception 'User not found';
-  end if;
-  if v_balance < v_cost then
-    raise exception 'Insufficient balance';
+  if not exists (
+    select 1 from public.venues where id = v_coupon.venue_id and owner_user_id = v_id
+  ) then
+    raise exception 'Not authorised for this venue';
   end if;
 
-  update public.users set balance = balance - v_cost where id = v_id;
+  if v_coupon.redeemed_at is not null then
+    raise exception 'Coupon was already redeemed';
+  end if;
+  if v_coupon.expires_at <= timezone('utc', now()) then
+    raise exception 'Coupon has expired';
+  end if;
 
-  insert into public.redemptions (user_id, offer_id, points_spent)
-    values (v_id, p_offer_id, v_cost)
-    returning * into v_redemption;
+  update public.coupons
+    set redeemed_at = timezone('utc', now())
+    where id = v_coupon.id
+    returning * into v_coupon;
 
-  return v_redemption;
+  return v_coupon;
 end;
 $$;
 
@@ -590,17 +722,23 @@ begin
 
   return (
     select json_build_object(
-      'checkins_today', (
-        select count(*) from public.checkins
+      'catches_today', (
+        select count(*) from public.catches
         where venue_id = p_venue_id and created_at >= current_date
       ),
-      'checkins_7d', (
-        select count(*) from public.checkins
+      'catches_7d', (
+        select count(*) from public.catches
         where venue_id = p_venue_id and created_at >= timezone('utc', now()) - interval '7 days'
       ),
       'unique_visitors_7d', (
-        select count(distinct user_id) from public.checkins
+        select count(distinct user_id) from public.catches
         where venue_id = p_venue_id and created_at >= timezone('utc', now()) - interval '7 days'
+      ),
+      'coupons_redeemed_7d', (
+        select count(*) from public.coupons
+        where venue_id = p_venue_id
+          and redeemed_at is not null
+          and redeemed_at >= timezone('utc', now()) - interval '7 days'
       ),
       'return_rate', (
         select coalesce(
@@ -609,7 +747,7 @@ begin
         )
         from (
           select user_id, count(*) as visit_count
-          from public.checkins
+          from public.catches
           where venue_id = p_venue_id
           group by user_id
         ) v
@@ -618,6 +756,11 @@ begin
   );
 end;
 $$;
+
+-- Old QR-flow functions, removed with the check-in model.
+drop function if exists public.generate_checkin_token(uuid, int);
+drop function if exists public.confirm_checkin(uuid, text, double precision, double precision);
+drop function if exists public.redeem_offer(uuid);
 
 -- ============================================================================
 -- Grants — only the authenticated role (i.e. a verified Telegram user) may
@@ -628,9 +771,9 @@ revoke all on function
   public.sync_step_activity(int),
   public.complete_onboarding(),
   public.referral_counts(),
-  public.generate_checkin_token(uuid, int),
-  public.confirm_checkin(uuid, text, double precision, double precision),
-  public.redeem_offer(uuid),
+  public.catch_bonus(uuid, double precision, double precision, double precision),
+  public.active_coupons(),
+  public.redeem_coupon(text),
   public.venue_analytics(uuid)
 from public, anon;
 
@@ -639,8 +782,8 @@ grant execute on function
   public.sync_step_activity(int),
   public.complete_onboarding(),
   public.referral_counts(),
-  public.generate_checkin_token(uuid, int),
-  public.confirm_checkin(uuid, text, double precision, double precision),
-  public.redeem_offer(uuid),
+  public.catch_bonus(uuid, double precision, double precision, double precision),
+  public.active_coupons(),
+  public.redeem_coupon(text),
   public.venue_analytics(uuid)
 to authenticated;

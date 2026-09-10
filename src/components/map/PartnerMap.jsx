@@ -1,6 +1,7 @@
 import L from 'leaflet';
-import { MapContainer, Marker, Popup, TileLayer, useMap } from 'react-leaflet';
-import { useEffect } from 'react';
+import { Circle, MapContainer, Marker, Popup, TileLayer, useMap } from 'react-leaflet';
+import { Fragment, useEffect } from 'react';
+import { CATCH_RADIUS_METERS } from '../../lib/geo';
 import markerIcon from 'leaflet/dist/images/marker-icon.png';
 import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png';
 import markerShadow from 'leaflet/dist/images/marker-shadow.png';
@@ -17,6 +18,15 @@ L.Icon.Default.mergeOptions({
 
 const DARK_TILES = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
 
+// The user's own position must not look like a venue pin, or "you are here"
+// and "walk here" become the same symbol on a dark map.
+const userDotIcon = L.divIcon({
+  className: 'user-dot',
+  html: '<span class="user-dot__core"></span><span class="user-dot__halo"></span>',
+  iconSize: [18, 18],
+  iconAnchor: [9, 9],
+});
+
 function RecenterOnUser({ position }) {
   const map = useMap();
   useEffect(() => {
@@ -26,7 +36,7 @@ function RecenterOnUser({ position }) {
   return null;
 }
 
-export default function PartnerMap({ userPosition, offers, onSelectOffer }) {
+export default function PartnerMap({ userPosition, venues, onSelectVenue }) {
   const center = userPosition
     ? [userPosition.lat, userPosition.lng]
     : [41.3111, 69.2797]; // Tashkent fallback
@@ -39,24 +49,33 @@ export default function PartnerMap({ userPosition, offers, onSelectOffer }) {
       />
       {userPosition && <RecenterOnUser position={userPosition} />}
       {userPosition && (
-        <Marker position={[userPosition.lat, userPosition.lng]}>
-          <Popup>You are here</Popup>
-        </Marker>
+        <Marker
+          position={[userPosition.lat, userPosition.lng]}
+          icon={userDotIcon}
+          interactive={false}
+        />
       )}
-      {offers
-        .filter((o) => o.location_lat && o.location_lng)
-        .map((offer) => (
-          <Marker
-            key={offer.id}
-            position={[offer.location_lat, offer.location_lng]}
-            eventHandlers={{ click: () => onSelectOffer(offer) }}
-          >
-            <Popup>
-              <strong>{offer.partner_name}</strong>
-              <br />
-              {offer.title}
-            </Popup>
-          </Marker>
+      {venues
+        .filter((v) => v.lat != null && v.lng != null)
+        .map((venue) => (
+          <Fragment key={venue.id}>
+            {/* The radar zone, drawn so the walk-closer instruction is legible. */}
+            <Circle
+              center={[venue.lat, venue.lng]}
+              radius={CATCH_RADIUS_METERS}
+              pathOptions={{ color: '#b84cff', weight: 1, fillOpacity: 0.15 }}
+            />
+            <Marker
+              position={[venue.lat, venue.lng]}
+              eventHandlers={{ click: () => onSelectVenue(venue) }}
+            >
+              <Popup>
+                <strong>{venue.name}</strong>
+                <br />
+                {venue.offer_title}
+              </Popup>
+            </Marker>
+          </Fragment>
         ))}
     </MapContainer>
   );

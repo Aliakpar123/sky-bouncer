@@ -1,66 +1,49 @@
 import { useEffect, useState } from 'react';
+import { Ticket } from 'lucide-react';
 import Header from '../components/layout/Header';
-import OfferCard from '../components/offers/OfferCard';
-import { useUser } from '../context/UserContext';
+import CouponCard from '../components/catch/CouponCard';
 import { supabase } from '../lib/supabase';
-import { haptic } from '../lib/telegram';
 
 export default function Offers() {
-  const { profile, refreshProfile } = useUser();
-  const [offers, setOffers] = useState([]);
-  const [redeemingId, setRedeemingId] = useState(null);
-  const [message, setMessage] = useState(null);
+  const [coupons, setCoupons] = useState([]);
+  const [venuesById, setVenuesById] = useState({});
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    async function loadOffers() {
-      const { data, error } = await supabase
-        .from('offers')
-        .select('*')
-        .order('cost_in_points', { ascending: true });
-      if (error) console.error('Failed to load offers', error);
-      else setOffers(data ?? []);
-    }
-    loadOffers();
-  }, []);
+    async function load() {
+      const [{ data: couponRows, error }, { data: venueRows }] = await Promise.all([
+        supabase.rpc('active_coupons'),
+        supabase.from('venues').select('id, name'),
+      ]);
 
-  async function handleRedeem(offer) {
-    setRedeemingId(offer.id);
-    setMessage(null);
-    try {
-      const { error } = await supabase.rpc('redeem_offer', { p_offer_id: offer.id });
-      if (error) throw error;
-      await refreshProfile(profile.id);
-      haptic('success');
-      setMessage({ type: 'success', text: `Redeemed: ${offer.title}` });
-    } catch (err) {
-      haptic('error');
-      setMessage({ type: 'error', text: err.message ?? 'Redemption failed' });
-    } finally {
-      setRedeemingId(null);
+      if (error) console.error('Failed to load coupons', error);
+      else setCoupons(couponRows ?? []);
+
+      setVenuesById(Object.fromEntries((venueRows ?? []).map((v) => [v.id, v.name])));
+      setLoading(false);
     }
-  }
+    load();
+  }, []);
 
   return (
     <div className="pb-24">
-      <Header title="Rewards" />
+      <Header title="My coupons" />
       <main className="px-4 pt-4 flex flex-col gap-3">
-        {message && (
-          <p className={`text-sm ${message.type === 'success' ? 'text-green-400' : 'text-red-400'}`}>
-            {message.text}
-          </p>
+        {loading && <p className="text-center text-white/40 text-sm mt-8">Loading…</p>}
+
+        {!loading && coupons.length === 0 && (
+          <div className="text-center mt-16 flex flex-col items-center gap-3">
+            <Ticket size={32} className="text-white/25" />
+            <p className="text-white/50 text-sm max-w-[260px]">
+              No active coupons. Walk to a partner venue on the radar and catch a bonus to get
+              one.
+            </p>
+          </div>
         )}
-        {offers.map((offer) => (
-          <OfferCard
-            key={offer.id}
-            offer={offer}
-            balance={profile?.balance ?? 0}
-            redeeming={redeemingId === offer.id}
-            onRedeem={handleRedeem}
-          />
+
+        {coupons.map((coupon) => (
+          <CouponCard key={coupon.id} coupon={coupon} venueName={venuesById[coupon.venue_id]} />
         ))}
-        {offers.length === 0 && (
-          <p className="text-center text-white/40 text-sm mt-8">No offers available yet.</p>
-        )}
       </main>
     </div>
   );

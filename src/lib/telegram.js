@@ -59,22 +59,6 @@ export function haptic(style = 'light') {
   }
 }
 
-/** Opens the native Telegram QR scanner and resolves with the scanned text, or null if cancelled. */
-export function scanQrCode(text = 'Scan the venue QR code to confirm your check-in') {
-  return new Promise((resolve) => {
-    try {
-      WebApp.showScanQrPopup({ text }, (data) => {
-        WebApp.closeScanQrPopup();
-        resolve(data ?? null);
-        return true;
-      });
-    } catch (err) {
-      console.warn('QR scanner unavailable', err);
-      resolve(null);
-    }
-  });
-}
-
 export function getThemeParams() {
   return WebApp?.themeParams ?? {};
 }

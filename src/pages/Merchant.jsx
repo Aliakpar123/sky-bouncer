@@ -1,6 +1,6 @@
 import { useParams } from 'react-router-dom';
 import Header from '../components/layout/Header';
-import QRGenerator from '../components/merchant/QRGenerator';
+import RedeemCoupon from '../components/merchant/RedeemCoupon';
 import MerchantDashboard from '../components/merchant/MerchantDashboard';
 
 export default function Merchant() {
@@ -23,8 +23,7 @@ export default function Merchant() {
       <Header title="Merchant portal" />
       <main className="px-4 pt-4 flex flex-col gap-6">
         <section>
-          <h2 className="text-sm font-semibold text-white/60 mb-2">Check-in code</h2>
-          <QRGenerator venueId={venueId} />
+          <RedeemCoupon />
         </section>
         <section>
           <h2 className="text-sm font-semibold text-white/60 mb-2">Analytics</h2>
