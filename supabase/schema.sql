@@ -6,6 +6,11 @@
 -- `telegram_id` claim of a JWT minted by the `telegram-auth` edge function,
 -- which is the only component that validates Telegram's initData signature.
 
+-- `gen_random_bytes` (check-in tokens) lives in pgcrypto. Supabase installs it
+-- into the `extensions` schema, so functions that use it must carry that
+-- schema on their search_path as well as `public`.
+create extension if not exists pgcrypto;
+
 -- ============================================================================
 -- Tables
 -- ============================================================================
@@ -93,15 +98,32 @@ create index if not exists idx_venues_owner on public.venues(owner_user_id);
 
 -- Reads the verified Telegram ID out of the request JWT. Returns null for
 -- anonymous callers, which every policy and RPC below treats as "no access".
+--
+-- Anonymous requests leave `request.jwt.claims` unset, empty, or non-numeric
+-- depending on the PostgREST version, and this function runs inside RLS
+-- policies — so a raw cast here would surface as a 500 on ordinary anonymous
+-- reads instead of an empty result. Every malformed case degrades to null.
 create or replace function public.current_telegram_id()
 returns bigint
-language sql
+language plpgsql
 stable
 as $$
-  select nullif(
-    current_setting('request.jwt.claims', true)::json ->> 'telegram_id',
-    ''
-  )::bigint;
+declare
+  v_claims text := nullif(current_setting('request.jwt.claims', true), '');
+  v_id bigint;
+begin
+  if v_claims is null then
+    return null;
+  end if;
+
+  begin
+    v_id := nullif(v_claims::json ->> 'telegram_id', '')::bigint;
+  exception when others then
+    return null;
+  end;
+
+  return v_id;
+end;
 $$;
 
 -- ============================================================================
@@ -118,12 +140,21 @@ alter table public.checkin_tokens enable row level security;
 alter table public.checkins enable row level security;
 alter table public.redemptions enable row level security;
 
+-- Dropped so the whole script stays re-runnable. The first group is the
+-- pre-JWT policy names, kept so an existing project upgrades cleanly.
 drop policy if exists "offers are publicly readable" on public.offers;
 drop policy if exists "venues are publicly readable" on public.venues;
 drop policy if exists "users are readable" on public.users;
 drop policy if exists "activities are readable" on public.activities;
 drop policy if exists "checkins are readable" on public.checkins;
 drop policy if exists "redemptions are readable" on public.redemptions;
+
+drop policy if exists "offers are readable by everyone" on public.offers;
+drop policy if exists "venues are readable by everyone" on public.venues;
+drop policy if exists "users read own row" on public.users;
+drop policy if exists "activities read own rows" on public.activities;
+drop policy if exists "checkins read own rows" on public.checkins;
+drop policy if exists "redemptions read own rows" on public.redemptions;
 
 -- The partner catalogue is public marketing data.
 create policy "offers are readable by everyone" on public.offers
@@ -343,7 +374,7 @@ create or replace function public.generate_checkin_token(
 ) returns text
 language plpgsql
 security definer
-set search_path = public
+set search_path = public, extensions
 as $$
 declare
   v_id bigint := public.current_telegram_id();

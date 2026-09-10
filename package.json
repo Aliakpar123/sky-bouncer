@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "test:db": "psql -v ON_ERROR_STOP=1 -d ${PGDATABASE:-pulse_test} -f supabase/schema.sql -f supabase/tests/rpc_test.sql",
+    "test:functions": "deno test --allow-env supabase/functions/telegram-auth/"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",

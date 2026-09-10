@@ -73,6 +73,26 @@ attribution is recorded by `upsert_user_session` the first time the referred
 user opens the app, which is the only point with trustworthy first-touch
 attribution.
 
+## Tests
+
+The data layer and the auth function both have tests, and they cover the
+abuse cases rather than the happy path — those are the parts worth trusting.
+
+```bash
+# 34 RPC tests: identity, step ceilings, referral cascade, venue ownership,
+# check-in verification, redemption. Needs a scratch Postgres 16 database.
+createdb pulse_test && npm run test:db
+
+# 10 signature tests: forged bot token, tampered user id, replay window.
+# Needs Deno (the edge-function runtime).
+npm run test:functions
+```
+
+`test:db` applies the schema and the tests in one pass; the test file runs
+inside a transaction and rolls back, so the database is reusable. It sets the
+`request.jwt.claims` GUC directly to impersonate a caller, which is the same
+path PostgREST uses in production.
+
 ## Core mechanics
 
 - **Steps → Points**: `useSteps` counts steps via `DeviceMotion` peak
@@ -124,9 +144,11 @@ data layer trusts it beyond reading the partner catalogue.
 
 Known gaps, in rough priority order:
 
-1. Nothing has been tested against a live Supabase project — the schema and
-   edge function are written but unrun. Verify the initData signature path
-   against a real bot token before trusting it.
+1. The logic is tested locally (see **Tests**) but nothing has run against a
+   live Supabase project. Two things can only be confirmed there: that
+   PostgREST populates `request.jwt.claims` the way `current_telegram_id()`
+   expects, and that a real Telegram client's `initData` passes the signature
+   check with a production bot token.
 2. There is no venue-owner onboarding flow; `venues.owner_user_id` has to be
    set by hand for now.
 3. `TonConnectUIProvider` wraps the whole app, so the wallet list (~25 CDN
