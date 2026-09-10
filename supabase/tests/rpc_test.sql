@@ -209,6 +209,76 @@ select pg_temp.check('points are multiplied by the streak the user now holds',
   (select balance = 300 from public.users where id = 1006));
 
 -- --------------------------------------------------------------------------
+-- Telegram Stars purchases
+-- --------------------------------------------------------------------------
+select pg_temp.act_as(1007);
+select public.upsert_user_session('Grace', 'grace', null);
+
+select public.grant_purchase(1007, 'streak_saver', 50, 'charge_aaa');
+select pg_temp.check('buying a streak saver credits one',
+  (select streak_savers = 1 from public.users where id = 1007));
+
+-- Telegram retries webhooks; the same charge must not pay out twice.
+select public.grant_purchase(1007, 'streak_saver', 50, 'charge_aaa');
+select pg_temp.check('replaying the same charge id grants nothing extra',
+  (select streak_savers = 1 from public.users where id = 1007));
+select pg_temp.check('the replay is not recorded as a second purchase',
+  (select count(*) = 1 from public.purchases where charge_id = 'charge_aaa'));
+
+select public.grant_purchase(1007, 'booster', 100, 'charge_bbb');
+select pg_temp.check('buying a booster sets an expiry in the future',
+  (select boost_expires_at > timezone('utc', now()) from public.users where id = 1007));
+
+-- Stacking extends rather than overwrites.
+create temporary table t_boost as
+  select boost_expires_at from public.users where id = 1007;
+select public.grant_purchase(1007, 'booster', 100, 'charge_ccc');
+select pg_temp.check('a second booster extends the first',
+  (select boost_expires_at from public.users where id = 1007)
+    > (select boost_expires_at from t_boost));
+
+select pg_temp.check_raises(
+  'an unknown product is rejected',
+  $$select public.grant_purchase(1007, 'free_money', 0, 'charge_ddd')$$,
+  'Unknown product');
+
+-- A booster doubles what the walking earns.
+update public.users
+  set streak = 0, last_active_date = null,
+      balance = 0, total_steps = 0,
+      last_step_sync_at = timezone('utc', now()) - interval '600 seconds'
+  where id = 1007;
+select public.sync_step_activity(2000);
+-- 2000 steps = 200 base, streak 1 (x1.0), booster x2 = 400.
+select pg_temp.check('an active booster doubles the step award',
+  (select balance = 400 from public.users where id = 1007));
+
+-- A streak saver absorbs a missed day instead of resetting the run.
+select pg_temp.act_as(1008);
+select public.upsert_user_session('Heidi', 'heidi', null);
+update public.users
+  set streak = 5,
+      last_active_date = current_date - 3,  -- missed two days
+      streak_savers = 1,
+      last_step_sync_at = timezone('utc', now()) - interval '600 seconds'
+  where id = 1008;
+
+select public.sync_step_activity(1000);
+select pg_temp.check('a streak saver keeps the run going through a missed day',
+  (select streak = 6 from public.users where id = 1008));
+select pg_temp.check('using a streak saver consumes it',
+  (select streak_savers = 0 from public.users where id = 1008));
+
+-- Without one, the same gap resets the streak.
+update public.users
+  set streak = 5, last_active_date = current_date - 3, streak_savers = 0,
+      last_step_sync_at = timezone('utc', now()) - interval '600 seconds'
+  where id = 1008;
+select public.sync_step_activity(1000);
+select pg_temp.check('without a saver a missed day resets the streak',
+  (select streak = 1 from public.users where id = 1008));
+
+-- --------------------------------------------------------------------------
 -- Two-tier referral cascade
 -- --------------------------------------------------------------------------
 select pg_temp.act_as(1003); -- Carol → Bob (tier 1) → Alice (tier 2)

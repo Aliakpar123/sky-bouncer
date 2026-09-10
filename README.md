@@ -40,12 +40,18 @@ bot/
 
 ```bash
 supabase functions deploy telegram-auth --no-verify-jwt
+supabase functions deploy create-invoice --no-verify-jwt
 supabase secrets set BOT_TOKEN=<your bot token> SUPABASE_JWT_SECRET=<Settings → API → JWT secret>
 ```
 
-`--no-verify-jwt` is required: this is the endpoint that *issues* the JWT, so
-it must accept unauthenticated calls. It is not an open door — it returns a
-token only for an `initData` string carrying a valid Telegram HMAC signature.
+`--no-verify-jwt` is required for `telegram-auth`: it is the endpoint that
+*issues* the JWT, so it must accept unauthenticated calls. It is not an open
+door — it returns a token only for an `initData` string carrying a valid
+Telegram HMAC signature. `create-invoice` verifies that JWT itself rather than
+relying on the gateway, so it is deployed the same way.
+
+Star payments also need the bot running: Telegram delivers `successful_payment`
+to the bot, not to the Mini App, and that is where the purchase is credited.
 
 ### 2. Frontend
 
@@ -81,8 +87,9 @@ The data layer and the auth function both have tests, and they cover the
 abuse cases rather than the happy path — those are the parts worth trusting.
 
 ```bash
-# 50 RPC tests: identity, step ceilings, referral cascade, catch anti-cheat
-# (spoofed accuracy, teleporting, daily cap, step gate), coupon lifecycle.
+# 66 RPC tests: identity, step ceilings, streak multipliers, referral cascade,
+# catch anti-cheat (spoofed accuracy, teleporting, daily cap, step gate),
+# coupon lifecycle, and Star purchases (idempotency, boosters, savers).
 # Needs a scratch Postgres 16 database.
 createdb pulse_test && npm run test:db
 
@@ -116,6 +123,13 @@ path PostgREST uses in production.
   zone (`catch_bonus`). A catch awards the venue's `reward_points` and issues
   a 15-minute coupon code the user shows at the counter — no scanner or POS
   integration on the merchant side.
+- **Streak multipliers**: 1.2x from a 3-day streak, 1.5x from 7 days
+  (`streak_multiplier`), applied to step points server-side.
+- **Telegram Stars**: Streak Savers (absorb a missed day) and Boosters (2x
+  step points for 3 hours). The Mini App asks `create-invoice` for an invoice
+  link — it never sends a price — and the bot credits the item on
+  `successful_payment` via `grant_purchase`, keyed on Telegram's charge id so
+  a retried webhook cannot pay out twice.
 - **Merchant portal**: `/merchant/:venueId` redeems a customer's code and
   shows catch analytics (`venue_analytics`: daily/7-day catches, unique
   visitors, coupons redeemed, return rate).
@@ -171,3 +185,8 @@ Known gaps, in rough priority order:
    set by hand for now.
 3. `TonConnectUIProvider` wraps the whole app, so the wallet list (~25 CDN
    hosts) is fetched on every screen, not just `/wallet`.
+4. Star payments are untested end to end — that needs a real bot token and a
+   Telegram client. The pieces (invoice creation, pre-checkout, crediting)
+   are wired but have never exchanged a real Star.
+5. Converting points to a TON Jetton is specced but not built; there is no
+   contract yet.

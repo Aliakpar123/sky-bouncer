@@ -57,6 +57,9 @@ create table if not exists public.users (
   last_catch_lat double precision,
   last_catch_lng double precision,
   last_catch_at timestamptz,
+  -- Telegram Stars purchases
+  streak_savers int not null default 0,
+  boost_expires_at timestamptz,
   created_at timestamptz not null default timezone('utc', now())
 );
 
@@ -65,6 +68,8 @@ alter table public.users add column if not exists onboarded_at timestamptz;
 alter table public.users add column if not exists last_catch_lat double precision;
 alter table public.users add column if not exists last_catch_lng double precision;
 alter table public.users add column if not exists last_catch_at timestamptz;
+alter table public.users add column if not exists streak_savers int not null default 0;
+alter table public.users add column if not exists boost_expires_at timestamptz;
 
 create table if not exists public.venues (
   id uuid primary key default gen_random_uuid(),
@@ -120,6 +125,40 @@ create table if not exists public.coupons (
   created_at timestamptz not null default timezone('utc', now())
 );
 
+-- Star products. Kept in the database so the price the shop screen displays
+-- and the price the invoice charges come from one place and cannot drift.
+create table if not exists public.products (
+  id text primary key,
+  title text not null,
+  description text not null,
+  stars int not null check (stars > 0),
+  active boolean not null default true,
+  sort_order int not null default 0
+);
+
+insert into public.products (id, title, description, stars, sort_order) values
+  ('streak_saver', 'Streak Saver',
+   'Keeps your streak alive through one missed day.', 50, 1),
+  ('booster', 'Booster',
+   'Doubles the points your steps earn for 3 hours.', 100, 2)
+on conflict (id) do update
+  set title = excluded.title,
+      description = excluded.description,
+      stars = excluded.stars,
+      sort_order = excluded.sort_order;
+
+-- Telegram Stars purchases, credited by the bot when Telegram confirms payment.
+-- `charge_id` is unique so a retried webhook cannot grant the same item twice.
+create table if not exists public.purchases (
+  id uuid primary key default gen_random_uuid(),
+  user_id bigint not null references public.users(id) on delete cascade,
+  product_id text not null,
+  stars int not null,
+  charge_id text not null unique,
+  created_at timestamptz not null default timezone('utc', now())
+);
+
+create index if not exists idx_purchases_user_id on public.purchases(user_id);
 create index if not exists idx_users_referrer_id on public.users(referrer_id);
 create index if not exists idx_activities_user_id on public.activities(user_id);
 create index if not exists idx_activities_user_day on public.activities(user_id, created_at);
@@ -189,6 +228,13 @@ create or replace function public.min_steps_for_catch() returns int
 create or replace function public.coupon_ttl_minutes() returns int
   language sql immutable as $$ select 15 $$;
 
+-- What a purchased booster does while it is running.
+create or replace function public.boost_multiplier() returns numeric
+  language sql immutable as $$ select 2.0::numeric $$;
+
+create or replace function public.boost_duration_hours() returns int
+  language sql immutable as $$ select 3 $$;
+
 -- Streak reward ladder. The UI renders the same steps, so both sides must be
 -- read from here rather than each carrying its own formula.
 create or replace function public.streak_multiplier(p_streak int)
@@ -229,6 +275,8 @@ alter table public.venues enable row level security;
 alter table public.activities enable row level security;
 alter table public.catches enable row level security;
 alter table public.coupons enable row level security;
+alter table public.purchases enable row level security;
+alter table public.products enable row level security;
 
 -- Dropped so the whole script stays re-runnable. The first groups are older
 -- policy names (pre-JWT, and the pre-catch check-in model), kept so an
@@ -242,6 +290,8 @@ drop policy if exists "users read own row" on public.users;
 drop policy if exists "activities read own rows" on public.activities;
 drop policy if exists "catches read own rows" on public.catches;
 drop policy if exists "coupons read own rows" on public.coupons;
+drop policy if exists "purchases read own rows" on public.purchases;
+drop policy if exists "products are readable by everyone" on public.products;
 
 -- The venue catalogue is public marketing data — the map has to render it
 -- before the user has gone anywhere.
@@ -263,6 +313,12 @@ create policy "catches read own rows" on public.catches
       select id from public.venues where owner_user_id = public.current_telegram_id()
     )
   );
+
+create policy "products are readable by everyone" on public.products
+  for select using (active);
+
+create policy "purchases read own rows" on public.purchases
+  for select using (user_id = public.current_telegram_id());
 
 create policy "coupons read own rows" on public.coupons
   for select using (
@@ -345,6 +401,8 @@ declare
   v_referrer_id bigint;
   v_grandreferrer_id bigint;
   v_new_streak int;
+  v_multiplier numeric;
+  v_saver_used boolean := false;
 begin
   if v_id is null then
     raise exception 'Not authenticated';
@@ -380,20 +438,31 @@ begin
     v_new_streak := v_user.streak;
   elsif v_user.last_active_date = current_date - 1 then
     v_new_streak := v_user.streak + 1;
+  elsif v_user.streak > 0 and v_user.streak_savers > 0 then
+    -- A purchased Streak Saver absorbs the missed day (or days) and keeps the
+    -- run going, which is the entire thing the user paid for.
+    v_new_streak := v_user.streak + 1;
+    v_saver_used := true;
   else
     v_new_streak := 1;
   end if;
 
   -- The multiplier follows the streak the user holds after today's activity,
-  -- which is the number the home screen shows them.
-  v_points := floor(
-    (v_steps::numeric / 1000 * 100) * public.streak_multiplier(v_new_streak)
-  )::int;
+  -- which is the number the home screen shows them. An active booster stacks
+  -- on top of it.
+  v_multiplier := public.streak_multiplier(v_new_streak);
+  if v_user.boost_expires_at is not null
+     and v_user.boost_expires_at > timezone('utc', now()) then
+    v_multiplier := v_multiplier * public.boost_multiplier();
+  end if;
+
+  v_points := floor((v_steps::numeric / 1000 * 100) * v_multiplier)::int;
 
   update public.users
     set total_steps = total_steps + v_steps,
         balance = balance + v_points,
         streak = v_new_streak,
+        streak_savers = streak_savers - (case when v_saver_used then 1 else 0 end),
         last_active_date = current_date,
         last_step_sync_at = timezone('utc', now())
     where id = v_id
@@ -446,6 +515,68 @@ begin
     returning * into v_user;
 
   if not found then
+    raise exception 'User not found';
+  end if;
+
+  return v_user;
+end;
+$$;
+
+-- ============================================================================
+-- RPC: grant_purchase
+-- Credits a Telegram Stars purchase. Called by the bot with the service role
+-- after Telegram confirms payment — never by the Mini App, which is why it
+-- takes a user id and is not granted to anon or authenticated.
+--
+-- Idempotent on charge_id: Telegram retries webhooks, and a retry must not
+-- hand out a second booster.
+-- ============================================================================
+create or replace function public.grant_purchase(
+  p_user_id bigint,
+  p_product_id text,
+  p_stars int,
+  p_charge_id text
+) returns public.users
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_user public.users;
+begin
+  if p_user_id is null or p_charge_id is null or p_product_id is null then
+    raise exception 'user id, product and charge id are required';
+  end if;
+
+  insert into public.purchases (user_id, product_id, stars, charge_id)
+    values (p_user_id, p_product_id, coalesce(p_stars, 0), p_charge_id)
+    on conflict (charge_id) do nothing;
+
+  if not found then
+    -- Already credited by an earlier delivery of the same payment.
+    return (select u from public.users u where u.id = p_user_id);
+  end if;
+
+  if p_product_id = 'streak_saver' then
+    update public.users
+      set streak_savers = streak_savers + 1
+      where id = p_user_id
+      returning * into v_user;
+  elsif p_product_id = 'booster' then
+    -- Stacking extends from whichever is later, so buying two in a row gives
+    -- the full duration of both rather than overwriting the first.
+    update public.users
+      set boost_expires_at = greatest(
+            coalesce(boost_expires_at, timezone('utc', now())),
+            timezone('utc', now())
+          ) + make_interval(hours => public.boost_duration_hours())
+      where id = p_user_id
+      returning * into v_user;
+  else
+    raise exception 'Unknown product %', p_product_id;
+  end if;
+
+  if v_user.id is null then
     raise exception 'User not found';
   end if;
 
@@ -784,6 +915,18 @@ drop function if exists public.redeem_offer(uuid);
 -- Grants — only the authenticated role (i.e. a verified Telegram user) may
 -- call the RPCs. The anon key alone can read the public offer catalogue.
 -- ============================================================================
+revoke all on function
+  public.grant_purchase(bigint, text, int, text)
+from public, anon, authenticated;
+
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'service_role') then
+    execute 'grant execute on function public.grant_purchase(bigint, text, int, text) to service_role';
+  end if;
+end
+$$;
+
 revoke all on function
   public.upsert_user_session(text, text, bigint),
   public.sync_step_activity(int),

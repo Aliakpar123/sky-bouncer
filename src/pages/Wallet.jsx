@@ -1,9 +1,10 @@
 import Header from '../components/layout/Header';
 import TonConnectButton from '../components/wallet/TonConnectButton';
+import StarShop from '../components/wallet/StarShop';
 import { useUser } from '../context/UserContext';
 
 export default function Wallet() {
-  const { profile } = useUser();
+  const { profile, refreshProfile } = useUser();
 
   return (
     <div className="pb-24">
@@ -13,7 +14,15 @@ export default function Wallet() {
           <p className="text-sm text-white/50">Points balance</p>
           <p className="text-4xl font-extrabold mt-1">{(profile?.balance ?? 0).toLocaleString()}</p>
         </div>
-        <TonConnectButton />
+
+        <StarShop
+          profile={profile}
+          onPurchased={() => profile && refreshProfile(profile.id)}
+        />
+
+        <div className="w-full border-t border-border pt-8">
+          <TonConnectButton />
+        </div>
       </main>
     </div>
   );

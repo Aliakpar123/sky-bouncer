@@ -66,6 +66,67 @@ bot.command('stats', async (ctx) => {
   );
 });
 
+// --- Telegram Stars payments -------------------------------------------------
+// Telegram gives roughly 10 seconds to answer a pre-checkout query; failing to
+// answer cancels the payment, so this stays deliberately trivial.
+bot.on('pre_checkout_query', async (ctx) => {
+  try {
+    await ctx.answerPreCheckoutQuery(true);
+  } catch (err) {
+    console.error('Failed to answer pre-checkout query', err);
+  }
+});
+
+bot.on('message:successful_payment', async (ctx) => {
+  const payment = ctx.message.successful_payment;
+
+  if (!supabase) {
+    console.error('Payment received but Supabase is not configured', payment);
+    return;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(payment.invoice_payload);
+  } catch {
+    console.error('Unparseable invoice payload', payment.invoice_payload);
+    return;
+  }
+
+  // The payload was written by our own create-invoice function, but the buyer
+  // is taken from the Telegram update rather than the payload, so a crafted
+  // payload cannot credit someone else's account.
+  const userId = ctx.from?.id;
+  if (!userId || payload.userId !== userId) {
+    console.error('Payment payload does not match the payer', { userId, payload });
+    return;
+  }
+
+  const { error } = await supabase.rpc('grant_purchase', {
+    p_user_id: userId,
+    p_product_id: payload.productId,
+    p_stars: payment.total_amount,
+    p_charge_id: payment.telegram_payment_charge_id,
+  });
+
+  if (error) {
+    // Do not confirm to the user: the payment succeeded but the grant did not,
+    // and that needs to be visible in the logs for manual repair.
+    console.error('Failed to credit purchase', { userId, payload, error });
+    await ctx.reply(
+      'Payment received, but crediting it failed. Our team has been notified — nothing is lost.'
+    );
+    return;
+  }
+
+  await ctx.reply(
+    payload.productId === 'streak_saver'
+      ? 'Streak Saver added. It will cover your next missed day automatically. 🔥'
+      : 'Booster active — your steps earn double for the next 3 hours. ⚡',
+    { reply_markup: launchKeyboard() }
+  );
+});
+
 bot.catch((err) => console.error('Bot error', err));
 
 if (WEBHOOK_URL) {
