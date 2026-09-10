@@ -180,6 +180,35 @@ select pg_temp.check('daily cap limits the day to 30k steps',
   (select total_steps = 30000 from public.users where id = 1004));
 
 -- --------------------------------------------------------------------------
+-- Streak multipliers
+-- --------------------------------------------------------------------------
+select pg_temp.check('a short streak earns no multiplier',
+  public.streak_multiplier(0) = 1.0 and public.streak_multiplier(2) = 1.0);
+select pg_temp.check('a 3-day streak earns 1.2x',
+  public.streak_multiplier(3) = 1.2 and public.streak_multiplier(6) = 1.2);
+select pg_temp.check('a 7-day streak earns 1.5x',
+  public.streak_multiplier(7) = 1.5 and public.streak_multiplier(40) = 1.5);
+select pg_temp.check('a null streak is treated as zero',
+  public.streak_multiplier(null) = 1.0);
+
+-- A user mid-streak: yesterday's activity carries a 6-day streak, so today's
+-- sync takes it to 7 and the award must be multiplied by 1.5.
+select pg_temp.act_as(1006);
+select public.upsert_user_session('Frank', 'frank', null);
+update public.users
+  set streak = 6,
+      last_active_date = current_date - 1,
+      last_step_sync_at = timezone('utc', now()) - interval '600 seconds'
+  where id = 1006;
+
+select public.sync_step_activity(2000);
+select pg_temp.check('the streak advances to 7',
+  (select streak = 7 from public.users where id = 1006));
+-- 2000 steps = 200 base points, at 1.5x = 300.
+select pg_temp.check('points are multiplied by the streak the user now holds',
+  (select balance = 300 from public.users where id = 1006));
+
+-- --------------------------------------------------------------------------
 -- Two-tier referral cascade
 -- --------------------------------------------------------------------------
 select pg_temp.act_as(1003); -- Carol → Bob (tier 1) → Alice (tier 2)

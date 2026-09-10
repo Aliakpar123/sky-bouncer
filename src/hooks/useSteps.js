@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 const STEP_THRESHOLD = 11.5; // m/s^2 acceleration magnitude peak that counts as a step
 const STEP_DEBOUNCE_MS = 300; // minimum time between counted steps
-const POINTS_PER_1000_STEPS = 100;
 
 /**
  * Counts walking steps from the device accelerometer (DeviceMotion API) using
@@ -70,7 +69,5 @@ export function useSteps() {
 
   const addManualSteps = useCallback((count) => setSteps((s) => s + count), []);
 
-  const pointsEarned = Math.floor((steps / 1000) * POINTS_PER_1000_STEPS);
-
-  return { steps, pointsEarned, supported, permission, requestPermission, addManualSteps };
+  return { steps, supported, permission, requestPermission, addManualSteps };
 }

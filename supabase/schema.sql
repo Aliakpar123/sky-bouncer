@@ -189,6 +189,20 @@ create or replace function public.min_steps_for_catch() returns int
 create or replace function public.coupon_ttl_minutes() returns int
   language sql immutable as $$ select 15 $$;
 
+-- Streak reward ladder. The UI renders the same steps, so both sides must be
+-- read from here rather than each carrying its own formula.
+create or replace function public.streak_multiplier(p_streak int)
+returns numeric
+language sql
+immutable
+as $$
+  select case
+    when coalesce(p_streak, 0) >= 7 then 1.5
+    when coalesce(p_streak, 0) >= 3 then 1.2
+    else 1.0
+  end::numeric;
+$$;
+
 -- Great-circle distance in metres.
 create or replace function public.distance_m(
   p_lat1 double precision, p_lng1 double precision,
@@ -362,8 +376,6 @@ begin
     return (select u from public.users u where u.id = v_id);
   end if;
 
-  v_points := floor(v_steps::numeric / 1000 * 100)::int;
-
   if v_user.last_active_date = current_date then
     v_new_streak := v_user.streak;
   elsif v_user.last_active_date = current_date - 1 then
@@ -371,6 +383,12 @@ begin
   else
     v_new_streak := 1;
   end if;
+
+  -- The multiplier follows the streak the user holds after today's activity,
+  -- which is the number the home screen shows them.
+  v_points := floor(
+    (v_steps::numeric / 1000 * 100) * public.streak_multiplier(v_new_streak)
+  )::int;
 
   update public.users
     set total_steps = total_steps + v_steps,

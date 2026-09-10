@@ -4,12 +4,14 @@ import StepsRing from '../components/home/StepsRing';
 import DailyStreak from '../components/home/DailyStreak';
 import { useUser } from '../context/UserContext';
 import { supabase } from '../lib/supabase';
+import { pointsForSteps } from '../lib/rewards';
 
 const SYNC_INTERVAL_MS = 30000;
 
 export default function Home({ steps: motion }) {
   const { profile, setProfile } = useUser();
-  const { steps, pointsEarned, supported, permission, requestPermission } = motion;
+  const { steps, supported, permission, requestPermission } = motion;
+  const pointsEarned = pointsForSteps(steps, profile?.streak ?? 0);
   const lastSyncedSteps = useRef(0);
 
   useEffect(() => {
