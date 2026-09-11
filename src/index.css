@@ -1,0 +1,59 @@
+@import 'leaflet/dist/leaflet.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow-x: hidden;
+}
+
+body {
+  background: #0a0a12;
+  color: #f4f4f8;
+  overscroll-behavior-y: contain;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.leaflet-container {
+  background: #0a0a12 !important;
+  width: 100%;
+  height: 100%;
+}
+
+/* Current-position dot on the radar map. */
+.user-dot {
+  position: relative;
+}
+.user-dot__core {
+  position: absolute;
+  inset: 4px;
+  border-radius: 9999px;
+  background: #4aa8ff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9);
+}
+.user-dot__halo {
+  position: absolute;
+  inset: -6px;
+  border-radius: 9999px;
+  background: rgba(74, 168, 255, 0.25);
+  animation: user-dot-pulse 2s ease-out infinite;
+}
+
+@keyframes user-dot-pulse {
+  0% { transform: scale(0.7); opacity: 0.7; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
