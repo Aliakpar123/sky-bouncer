@@ -26,7 +26,8 @@ src/
 supabase/
   schema.sql     Tables, RLS policies, and SECURITY DEFINER RPC functions
 bot/
-  index.js       grammY bot: /start deep-link handling, /stats
+  index.js       grammY bot: /start deep links, /stats, Stars payments, admin review
+  format.js      message formatting + argument parsing for the admin commands
 ```
 
 ## Local setup
@@ -75,6 +76,17 @@ npm install
 npm start
 ```
 
+Set `ADMIN_USER_IDS` to the Telegram IDs allowed to review venue applications.
+Those accounts get three commands: `/applications` lists the queue with a map
+link for each, `/approve <id> [points]` creates the venue at the given reward
+(150 by default), and `/reject <id> [reason]` declines it. Both outcomes
+message the applicant. Non-admins get no reply at all, so the commands do not
+advertise themselves.
+
+Telegram forbids a bot from opening a conversation, so an applicant who
+reached the Mini App without ever messaging the bot cannot be notified — the
+admin is told when that happens rather than left assuming it arrived.
+
 The bot's `/start` handler forwards the `startapp` referral payload
 (`REF_<telegramId>`) into the Mini App launch button — actual referral
 attribution is recorded by `upsert_user_session` the first time the referred
@@ -96,6 +108,10 @@ createdb pulse_test && npm run test:db
 # 10 signature tests: forged bot token, tampered user id, replay window.
 # Needs Deno (the edge-function runtime).
 npm run test:functions
+
+# 8 bot tests: HTML escaping of applicant-supplied text, admin argument
+# parsing, ambiguous-handle handling.
+cd bot && npm test
 ```
 
 `test:db` applies the schema and the tests in one pass; the test file runs
@@ -187,8 +203,9 @@ Known gaps, in rough priority order:
    PostgREST populates `request.jwt.claims` the way `current_telegram_id()`
    expects, and that a real Telegram client's `initData` passes the signature
    check with a production bot token.
-2. Application review has no admin UI: approving means calling
-   `review_venue_application` from the Supabase console or a bot command.
+2. Nothing notifies admins that an application arrived — the queue is pulled
+   with `/applications`, not pushed. Fine at a handful a week; a Supabase
+   webhook would be the fix if volume grows.
 3. Star payments are untested end to end — that needs a real bot token and a
    Telegram client. The pieces (invoice creation, pre-checkout, crediting)
    are wired but have never exchanged a real Star.
