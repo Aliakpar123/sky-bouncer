@@ -1,0 +1,16 @@
+{
+  "name": "pulse-radar-contracts",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "compile": "node compile.mjs",
+    "test": "node compile.mjs && node --test points_claim.test.mjs"
+  },
+  "dependencies": {
+    "@ton/core": "^0.60.1",
+    "@ton/crypto": "^3.3.0",
+    "@ton/sandbox": "^0.31.0",
+    "@ton/tolk-js": "^1.4.2"
+  }
+}

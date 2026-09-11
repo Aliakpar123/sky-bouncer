@@ -28,6 +28,8 @@ supabase/
 bot/
   index.js       grammY bot: /start deep links, /stats, Stars payments, admin review
   format.js      message formatting + argument parsing for the admin commands
+contracts/
+  src/           PointsClaim in Tolk — signed-permit bridge from points to Jettons
 ```
 
 ## Local setup
@@ -112,6 +114,10 @@ npm run test:functions
 # 8 bot tests: HTML escaping of applicant-supplied text, admin argument
 # parsing, ambiguous-handle handling.
 cd bot && npm test
+
+# 13 contract tests on a local TVM emulator: forged permits, replays, a permit
+# redeemed by the wrong wallet, and the ceilings that bound a stolen key.
+cd contracts && npm test
 ```
 
 `test:db` applies the schema and the tests in one pass; the test file runs
@@ -209,5 +215,7 @@ Known gaps, in rough priority order:
 3. Star payments are untested end to end — that needs a real bot token and a
    Telegram client. The pieces (invoice creation, pre-checkout, crediting)
    are wired but have never exchanged a real Star.
-4. Converting points to a TON Jetton is specced but not built; there is no
-   contract yet.
+4. The points-to-Jetton path is half built. `contracts/` holds `PointsClaim`
+   with tests, but nothing has touched a network, no Jetton has been minted,
+   and the backend side — deducting points and signing the permit — does not
+   exist yet, so the feature is not usable end to end.
