@@ -438,6 +438,82 @@ select pg_temp.check('expired coupons are not listed as active',
       and c.id in (select id from public.active_coupons())));
 
 -- --------------------------------------------------------------------------
+-- Merchant onboarding
+-- --------------------------------------------------------------------------
+select pg_temp.act_as(1004);
+
+select pg_temp.check_raises(
+  'an application needs a name and an offer',
+  $$select public.submit_venue_application('  ', 'cafe', 'Free tea', 41.31, 69.27, null)$$,
+  'required');
+
+select pg_temp.check_raises(
+  'an application needs valid coordinates',
+  $$select public.submit_venue_application('Corner Cafe', 'cafe', 'Free tea', 999, 69.27, null)$$,
+  'valid location');
+
+-- Called from FROM, not as `(f()).*`: expanding a composite in the select
+-- list re-invokes the function once per column, which would trip the
+-- one-open-application rule against itself.
+create temporary table t_app as
+  select * from public.submit_venue_application(
+    'Corner Cafe', 'cafe', 'Free tea', 41.3100, 69.2700, '@owner'
+  );
+
+select pg_temp.check('an application starts pending',
+  (select status = 'pending' from t_app));
+select pg_temp.check('an application does not create a venue yet',
+  (select count(*) = 0 from public.venues where name = 'Corner Cafe'));
+
+select pg_temp.check_raises(
+  'a second open application is refused',
+  $$select public.submit_venue_application('Another Cafe', 'cafe', 'Free tea', 41.31, 69.27, null)$$,
+  'awaiting review');
+
+select pg_temp.check('the applicant owns no venues before approval',
+  (select count(*) = 0 from public.my_venues()));
+select pg_temp.check('the applicant can see their own application',
+  (select count(*) = 1 from public.my_venue_applications()));
+
+-- Another user must not see it.
+select pg_temp.act_as(1002);
+select pg_temp.check('applications are not visible to other users',
+  (select count(*) = 0 from public.my_venue_applications()));
+
+-- Approval is the admin path: it creates the venue and hands over ownership.
+select public.review_venue_application((select id from t_app), true, 175, 'Verified by phone');
+
+select pg_temp.act_as(1004);
+select pg_temp.check('approval creates the venue with the reviewer''s reward',
+  (select reward_points = 175 from public.venues where name = 'Corner Cafe'));
+select pg_temp.check('approval hands ownership to the applicant',
+  (select count(*) = 1 from public.my_venues()));
+select pg_temp.check('the application records the created venue',
+  (select venue_id is not null and status = 'approved'
+     from public.venue_applications where id = (select id from t_app)));
+
+select pg_temp.check_raises(
+  'an application cannot be reviewed twice',
+  format($$select public.review_venue_application(%L, true, 150, null)$$,
+    (select id from t_app)),
+  'already approved');
+
+-- Once settled, the applicant may apply again.
+create temporary table t_app2 as
+  select * from public.submit_venue_application(
+    'Second Spot', 'bakery', 'Free roll', 41.3110, 69.2710, null
+  );
+select pg_temp.check('a new application is allowed once the previous one is settled',
+  (select status = 'pending' from t_app2));
+
+select public.review_venue_application((select id from t_app2), false, null, 'Outside coverage');
+select pg_temp.check('rejection does not create a venue',
+  (select count(*) = 0 from public.venues where name = 'Second Spot'));
+select pg_temp.check('rejection is recorded with its note',
+  (select status = 'rejected' and review_note = 'Outside coverage'
+     from public.venue_applications where id = (select id from t_app2)));
+
+-- --------------------------------------------------------------------------
 -- Venue analytics stay owner-only
 -- --------------------------------------------------------------------------
 select pg_temp.act_as(1002);

@@ -87,7 +87,7 @@ The data layer and the auth function both have tests, and they cover the
 abuse cases rather than the happy path — those are the parts worth trusting.
 
 ```bash
-# 66 RPC tests: identity, step ceilings, streak multipliers, referral cascade,
+# 81 RPC tests: identity, step ceilings, streak multipliers, referral cascade,
 # catch anti-cheat (spoofed accuracy, teleporting, daily cap, step gate),
 # coupon lifecycle, and Star purchases (idempotency, boosters, savers).
 # Needs a scratch Postgres 16 database.
@@ -130,7 +130,13 @@ path PostgREST uses in production.
   link — it never sends a price — and the bot credits the item on
   `successful_payment` via `grant_purchase`, keyed on Telegram's charge id so
   a retried webhook cannot pay out twice.
-- **Merchant portal**: `/merchant/:venueId` redeems a customer's code and
+- **Merchant onboarding**: an owner applies from `/merchant` while standing at
+  their venue (`submit_venue_application`). Applications are reviewed by a
+  human — `reward_points` is points emission, so self-serve listing would let
+  anyone mint currency from their own kitchen. Approval
+  (`review_venue_application`, service_role only) creates the venue and hands
+  ownership to the applicant.
+- **Merchant portal**: once approved, `/merchant` redeems a customer's code and
   shows catch analytics (`venue_analytics`: daily/7-day catches, unique
   visitors, coupons redeemed, return rate).
 
@@ -181,12 +187,10 @@ Known gaps, in rough priority order:
    PostgREST populates `request.jwt.claims` the way `current_telegram_id()`
    expects, and that a real Telegram client's `initData` passes the signature
    check with a production bot token.
-2. There is no venue-owner onboarding flow; `venues.owner_user_id` has to be
-   set by hand for now.
-3. `TonConnectUIProvider` wraps the whole app, so the wallet list (~25 CDN
-   hosts) is fetched on every screen, not just `/wallet`.
-4. Star payments are untested end to end — that needs a real bot token and a
+2. Application review has no admin UI: approving means calling
+   `review_venue_application` from the Supabase console or a bot command.
+3. Star payments are untested end to end — that needs a real bot token and a
    Telegram client. The pieces (invoice creation, pre-checkout, crediting)
    are wired but have never exchanged a real Star.
-5. Converting points to a TON Jetton is specced but not built; there is no
+4. Converting points to a TON Jetton is specced but not built; there is no
    contract yet.

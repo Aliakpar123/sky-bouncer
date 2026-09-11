@@ -1,5 +1,4 @@
 import { Route, Routes } from 'react-router-dom';
-import { TonConnectUIProvider } from '@tonconnect/ui-react';
 import { UserProvider, useUser } from './context/UserContext';
 import { useSteps } from './hooks/useSteps';
 import TabBar from './components/layout/TabBar';
@@ -10,9 +9,6 @@ import Referral from './pages/Referral';
 import Wallet from './pages/Wallet';
 import Merchant from './pages/Merchant';
 import Onboarding from './pages/Onboarding';
-
-const TON_MANIFEST_URL =
-  import.meta.env.VITE_TONCONNECT_MANIFEST_URL ?? '/tonconnect-manifest.json';
 
 function AppShell() {
   const { profile, loading, error } = useUser();
@@ -48,7 +44,7 @@ function AppShell() {
         <Route path="/offers" element={<Offers />} />
         <Route path="/referral" element={<Referral />} />
         <Route path="/wallet" element={<Wallet />} />
-        <Route path="/merchant/:venueId" element={<Merchant />} />
+        <Route path="/merchant" element={<Merchant />} />
       </Routes>
       <TabBar />
     </>
@@ -57,10 +53,8 @@ function AppShell() {
 
 export default function App() {
   return (
-    <TonConnectUIProvider manifestUrl={TON_MANIFEST_URL}>
-      <UserProvider>
-        <AppShell />
-      </UserProvider>
-    </TonConnectUIProvider>
+    <UserProvider>
+      <AppShell />
+    </UserProvider>
   );
 }

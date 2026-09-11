@@ -1,7 +1,16 @@
+import { TonConnectUIProvider } from '@tonconnect/ui-react';
+import { Store } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import Header from '../components/layout/Header';
 import TonConnectButton from '../components/wallet/TonConnectButton';
 import StarShop from '../components/wallet/StarShop';
 import { useUser } from '../context/UserContext';
+
+// Mounted here rather than around the whole app: the provider fetches the
+// wallet list from ~25 CDN hosts on mount, and that has no business happening
+// while someone is looking at the step counter.
+const TON_MANIFEST_URL =
+  import.meta.env.VITE_TONCONNECT_MANIFEST_URL ?? '/tonconnect-manifest.json';
 
 export default function Wallet() {
   const { profile, refreshProfile } = useUser();
@@ -21,8 +30,18 @@ export default function Wallet() {
         />
 
         <div className="w-full border-t border-border pt-8">
-          <TonConnectButton />
+          <TonConnectUIProvider manifestUrl={TON_MANIFEST_URL}>
+            <TonConnectButton />
+          </TonConnectUIProvider>
         </div>
+
+        <Link
+          to="/merchant"
+          className="w-full flex items-center justify-center gap-2 text-sm text-white/45 border-t border-border pt-6"
+        >
+          <Store size={15} />
+          Own a venue? List it on the radar
+        </Link>
       </main>
     </div>
   );

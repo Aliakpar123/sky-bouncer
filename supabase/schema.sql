@@ -125,6 +125,29 @@ create table if not exists public.coupons (
   created_at timestamptz not null default timezone('utc', now())
 );
 
+-- Venue applications. A venue's reward_points is points emission, so letting
+-- anyone self-serve a live venue would let them mint currency from their own
+-- kitchen. Applications land here and a human approves them.
+create table if not exists public.venue_applications (
+  id uuid primary key default gen_random_uuid(),
+  applicant_user_id bigint not null references public.users(id) on delete cascade,
+  name text not null,
+  category text,
+  offer_title text not null,
+  lat double precision not null,
+  lng double precision not null,
+  contact text,
+  status text not null default 'pending'
+    check (status in ('pending', 'approved', 'rejected')),
+  venue_id uuid references public.venues(id),
+  review_note text,
+  reviewed_at timestamptz,
+  created_at timestamptz not null default timezone('utc', now())
+);
+
+create index if not exists idx_venue_apps_applicant
+  on public.venue_applications(applicant_user_id);
+
 -- Star products. Kept in the database so the price the shop screen displays
 -- and the price the invoice charges come from one place and cannot drift.
 create table if not exists public.products (
@@ -277,6 +300,7 @@ alter table public.catches enable row level security;
 alter table public.coupons enable row level security;
 alter table public.purchases enable row level security;
 alter table public.products enable row level security;
+alter table public.venue_applications enable row level security;
 
 -- Dropped so the whole script stays re-runnable. The first groups are older
 -- policy names (pre-JWT, and the pre-catch check-in model), kept so an
@@ -292,6 +316,7 @@ drop policy if exists "catches read own rows" on public.catches;
 drop policy if exists "coupons read own rows" on public.coupons;
 drop policy if exists "purchases read own rows" on public.purchases;
 drop policy if exists "products are readable by everyone" on public.products;
+drop policy if exists "applications read own rows" on public.venue_applications;
 
 -- The venue catalogue is public marketing data — the map has to render it
 -- before the user has gone anywhere.
@@ -313,6 +338,9 @@ create policy "catches read own rows" on public.catches
       select id from public.venues where owner_user_id = public.current_telegram_id()
     )
   );
+
+create policy "applications read own rows" on public.venue_applications
+  for select using (applicant_user_id = public.current_telegram_id());
 
 create policy "products are readable by everyone" on public.products
   for select using (active);
@@ -519,6 +547,148 @@ begin
   end if;
 
   return v_user;
+end;
+$$;
+
+-- ============================================================================
+-- RPC: submit_venue_application / my_venues / my_venue_applications
+-- Self-serve intake for merchants. The applicant proposes a location and an
+-- offer; they cannot set reward_points, because that is points emission and
+-- belongs to whoever reviews the application.
+-- ============================================================================
+create or replace function public.submit_venue_application(
+  p_name text,
+  p_category text,
+  p_offer_title text,
+  p_lat double precision,
+  p_lng double precision,
+  p_contact text
+) returns public.venue_applications
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_id bigint := public.current_telegram_id();
+  v_application public.venue_applications;
+begin
+  if v_id is null then
+    raise exception 'Not authenticated';
+  end if;
+  if coalesce(trim(p_name), '') = '' or coalesce(trim(p_offer_title), '') = '' then
+    raise exception 'Venue name and offer are required';
+  end if;
+  if p_lat is null or p_lng is null
+     or p_lat not between -90 and 90 or p_lng not between -180 and 180 then
+    raise exception 'A valid location is required';
+  end if;
+
+  -- One open application at a time keeps the review queue from being flooded
+  -- by a single account.
+  if exists (
+    select 1 from public.venue_applications
+    where applicant_user_id = v_id and status = 'pending'
+  ) then
+    raise exception 'You already have an application awaiting review';
+  end if;
+
+  insert into public.venue_applications (
+    applicant_user_id, name, category, offer_title, lat, lng, contact
+  )
+  values (
+    v_id, trim(p_name), nullif(trim(coalesce(p_category, '')), ''),
+    trim(p_offer_title), p_lat, p_lng,
+    nullif(trim(coalesce(p_contact, '')), '')
+  )
+  returning * into v_application;
+
+  return v_application;
+end;
+$$;
+
+create or replace function public.my_venues()
+returns setof public.venues
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select * from public.venues
+  where owner_user_id = public.current_telegram_id()
+    and public.current_telegram_id() is not null
+  order by created_at;
+$$;
+
+create or replace function public.my_venue_applications()
+returns setof public.venue_applications
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select * from public.venue_applications
+  where applicant_user_id = public.current_telegram_id()
+    and public.current_telegram_id() is not null
+  order by created_at desc;
+$$;
+
+-- ============================================================================
+-- RPC: review_venue_application
+-- The approval side, granted to service_role only: an admin runs it from the
+-- Supabase console or a bot command. Approving creates the live venue and
+-- hands ownership to the applicant.
+-- ============================================================================
+create or replace function public.review_venue_application(
+  p_application_id uuid,
+  p_approve boolean,
+  p_reward_points int default 150,
+  p_note text default null
+) returns public.venue_applications
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_application public.venue_applications;
+  v_venue public.venues;
+begin
+  select * into v_application
+    from public.venue_applications
+    where id = p_application_id
+    for update;
+
+  if not found then
+    raise exception 'Application not found';
+  end if;
+  if v_application.status <> 'pending' then
+    raise exception 'Application was already %', v_application.status;
+  end if;
+
+  if not p_approve then
+    update public.venue_applications
+      set status = 'rejected', review_note = p_note, reviewed_at = timezone('utc', now())
+      where id = p_application_id
+      returning * into v_application;
+    return v_application;
+  end if;
+
+  insert into public.venues (name, category, reward_points, offer_title, lat, lng, owner_user_id)
+  values (
+    v_application.name, v_application.category, coalesce(p_reward_points, 150),
+    v_application.offer_title, v_application.lat, v_application.lng,
+    v_application.applicant_user_id
+  )
+  returning * into v_venue;
+
+  update public.venue_applications
+    set status = 'approved',
+        venue_id = v_venue.id,
+        review_note = p_note,
+        reviewed_at = timezone('utc', now())
+    where id = p_application_id
+    returning * into v_application;
+
+  return v_application;
 end;
 $$;
 
@@ -916,13 +1086,15 @@ drop function if exists public.redeem_offer(uuid);
 -- call the RPCs. The anon key alone can read the public offer catalogue.
 -- ============================================================================
 revoke all on function
-  public.grant_purchase(bigint, text, int, text)
+  public.grant_purchase(bigint, text, int, text),
+  public.review_venue_application(uuid, boolean, int, text)
 from public, anon, authenticated;
 
 do $$
 begin
   if exists (select 1 from pg_roles where rolname = 'service_role') then
     execute 'grant execute on function public.grant_purchase(bigint, text, int, text) to service_role';
+    execute 'grant execute on function public.review_venue_application(uuid, boolean, int, text) to service_role';
   end if;
 end
 $$;
@@ -932,6 +1104,9 @@ revoke all on function
   public.sync_step_activity(int),
   public.complete_onboarding(),
   public.referral_counts(),
+  public.submit_venue_application(text, text, text, double precision, double precision, text),
+  public.my_venues(),
+  public.my_venue_applications(),
   public.catch_bonus(uuid, double precision, double precision, double precision),
   public.active_coupons(),
   public.redeem_coupon(text),
@@ -943,6 +1118,9 @@ grant execute on function
   public.sync_step_activity(int),
   public.complete_onboarding(),
   public.referral_counts(),
+  public.submit_venue_application(text, text, text, double precision, double precision, text),
+  public.my_venues(),
+  public.my_venue_applications(),
   public.catch_bonus(uuid, double precision, double precision, double precision),
   public.active_coupons(),
   public.redeem_coupon(text),

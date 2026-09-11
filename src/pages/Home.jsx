@@ -1,9 +1,12 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Header from '../components/layout/Header';
 import StepsRing from '../components/home/StepsRing';
 import DailyStreak from '../components/home/DailyStreak';
+import NearestVenue from '../components/home/NearestVenue';
 import { useUser } from '../context/UserContext';
+import { useGeolocation } from '../hooks/useGeolocation';
 import { supabase } from '../lib/supabase';
+import { distanceMeters } from '../lib/geo';
 import { pointsForSteps } from '../lib/rewards';
 
 const SYNC_INTERVAL_MS = 30000;
@@ -13,6 +16,45 @@ export default function Home({ steps: motion }) {
   const { steps, supported, permission, requestPermission } = motion;
   const pointsEarned = pointsForSteps(steps, profile?.streak ?? 0, profile?.boost_expires_at);
   const lastSyncedSteps = useRef(0);
+  const { position } = useGeolocation();
+  const [venues, setVenues] = useState([]);
+  const [caughtVenueIds, setCaughtVenueIds] = useState(new Set());
+
+  useEffect(() => {
+    async function loadNearby() {
+      const [{ data: venueRows }, { data: catchRows }] = await Promise.all([
+        supabase.from('venues').select('id, name, offer_title, reward_points, lat, lng'),
+        supabase.from('catches').select('venue_id, created_at'),
+      ]);
+      setVenues(venueRows ?? []);
+
+      const today = new Date().toISOString().slice(0, 10);
+      setCaughtVenueIds(
+        new Set(
+          (catchRows ?? [])
+            .filter((c) => c.created_at?.slice(0, 10) === today)
+            .map((c) => c.venue_id)
+        )
+      );
+    }
+    loadNearby();
+  }, []);
+
+  // Prefer the closest venue the user can still catch today; fall back to the
+  // closest overall so the card does not vanish once they have caught it.
+  const nearest = useMemo(() => {
+    if (!position || venues.length === 0) return null;
+    const withDistance = venues
+      .filter((v) => v.lat != null && v.lng != null)
+      .map((v) => ({
+        venue: v,
+        distance: distanceMeters(position.lat, position.lng, v.lat, v.lng),
+        caught: caughtVenueIds.has(v.id),
+      }))
+      .sort((a, b) => a.distance - b.distance);
+
+    return withDistance.find((v) => !v.caught) ?? withDistance[0] ?? null;
+  }, [position, venues, caughtVenueIds]);
 
   useEffect(() => {
     if (!profile) return undefined;
@@ -58,6 +100,17 @@ export default function Home({ steps: motion }) {
           streak={profile?.streak ?? 0}
           boostExpiresAt={profile?.boost_expires_at}
         />
+
+        {nearest && (
+          <div className="flex flex-col gap-2">
+            <h2 className="text-sm font-semibold text-white/60">Closest bonus</h2>
+            <NearestVenue
+              venue={nearest.venue}
+              distance={nearest.distance}
+              caught={nearest.caught}
+            />
+          </div>
+        )}
       </main>
     </div>
   );
